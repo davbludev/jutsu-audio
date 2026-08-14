@@ -1,0 +1,2 @@
+[alias]
+quality = "run --quiet -p xtask -- quality"

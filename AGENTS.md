@@ -3,10 +3,12 @@
 ## Project index
 
 - `Cargo.toml`: workspace membership.
+- `src/main.rs`: modern eframe desktop shell, sample timeline, inspector, transport, and project actions.
 - `crates/jutsu-audio-model`: portable project schema, stable IDs, and validation.
+- `crates/jutsu-audio-project`: atomic persistence, migrations, WAV assets, waveform cache, and portable paths.
 - `crates/jutsu-audio-commands`: atomic revisioned command application and change events.
 - `crates/jutsu-audio-extensions`: typed synth, effect, and generator contracts/registries.
-- `crates/jutsu-audio-engine`: immutable render snapshots and audio-graph foundations.
+- `crates/jutsu-audio-engine`: immutable render snapshots, lock-free playback transport, system output, and audio-graph foundations.
 - `fixtures/projects`: versioned deterministic golden projects.
 - `xtask`: cross-platform repository automation; `cargo quality` runs required gates.
 - `docs/quality.md`: tests, fixtures, migrations, benchmarks, and real-time-safety conventions.

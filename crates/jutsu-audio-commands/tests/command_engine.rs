@@ -50,6 +50,59 @@ fn envelope(expected_revision: u64, commands: Vec<ProjectCommand>) -> CommandEnv
 }
 
 #[test]
+fn updates_and_removes_clip_through_shared_commands() {
+    let mut initial = project();
+    let asset = Asset {
+        id: AssetId::new(),
+        name: "Hit".into(),
+        source: AudioAssetSource::File {
+            path: "hit.wav".into(),
+        },
+    };
+    let clip = Clip {
+        id: ClipId::new(),
+        asset_id: asset.id,
+        start_sample: 0,
+        source_start_sample: 0,
+        duration_samples: 100,
+        parameters: BTreeMap::new(),
+    };
+    initial.assets.push(asset);
+    initial.tracks[0].layers[0].clips.push(clip.clone());
+    let mut engine = ProjectCommandEngine::new(initial).unwrap();
+
+    engine
+        .apply(envelope(
+            0,
+            vec![ProjectCommand::UpdateClip {
+                clip_id: clip.id,
+                start_sample: 25,
+                source_start_sample: 5,
+                duration_samples: 50,
+                gain_db: -3.0,
+            }],
+        ))
+        .unwrap();
+    let updated = &engine.project().tracks[0].layers[0].clips[0];
+    assert_eq!(
+        (
+            updated.start_sample,
+            updated.source_start_sample,
+            updated.duration_samples
+        ),
+        (25, 5, 50)
+    );
+
+    engine
+        .apply(envelope(
+            1,
+            vec![ProjectCommand::RemoveClip { clip_id: clip.id }],
+        ))
+        .unwrap();
+    assert!(engine.project().tracks[0].layers[0].clips.is_empty());
+}
+
+#[test]
 fn applies_command_and_publishes_ordered_change_at_new_revision() {
     let initial = project();
     let project_id = initial.id.to_string();

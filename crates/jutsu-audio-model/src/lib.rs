@@ -225,6 +225,13 @@ pub enum AudioAssetSource {
     File {
         path: String,
     },
+    ManagedFile {
+        path: String,
+        fingerprint: String,
+        sample_rate: u32,
+        channels: u16,
+        frame_count: u64,
+    },
     Generated {
         generator_type: String,
         algorithm_version: u32,

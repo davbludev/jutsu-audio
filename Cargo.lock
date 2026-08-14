@@ -1771,6 +1771,9 @@ dependencies = [
  "jutsu-audio-model",
  "jutsu-audio-project",
  "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

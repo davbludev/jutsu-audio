@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[workspace]
+members = [
+    ".",
+    "crates/jutsu-audio-commands",
+    "crates/jutsu-audio-engine",
+    "crates/jutsu-audio-extensions",
+    "crates/jutsu-audio-model",
+]
+resolver = "3"

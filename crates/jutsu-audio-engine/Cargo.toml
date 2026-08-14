@@ -1,0 +1,9 @@
+[package]
+name = "jutsu-audio-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+jutsu-audio-extensions = { path = "../jutsu-audio-extensions" }
+jutsu-audio-model = { path = "../jutsu-audio-model" }

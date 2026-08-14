@@ -7,5 +7,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 arc-swap = "1.7.1"
 cpal = "0.17.1"
+hound = "3.5.1"
 jutsu-audio-extensions = { path = "../jutsu-audio-extensions" }
 jutsu-audio-model = { path = "../jutsu-audio-model" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

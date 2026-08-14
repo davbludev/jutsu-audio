@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use jutsu_audio_commands::{
     COMMAND_PROTOCOL_VERSION, CommandEnvelope, CommandId, ProjectCommand, ProjectCommandEngine,
 };
+use jutsu_audio_engine::{ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot};
 use jutsu_audio_model::{AssetId, Clip, ClipId, LayerId, ParameterValue, Project, TrackId};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use serde::Deserialize;
@@ -53,6 +54,16 @@ enum Request {
         path: PathBuf,
         clip_id: ClipId,
     },
+    ExportWav {
+        protocol_version: u32,
+        path: PathBuf,
+        output: PathBuf,
+        encoding: CliExportEncoding,
+        #[serde(default)]
+        start_frame: u64,
+        #[serde(default = "full_frame_count")]
+        frame_count: u64,
+    },
     #[serde(rename = "transport_request")]
     Transport {
         protocol_version: u32,
@@ -69,6 +80,17 @@ enum TransportAction {
     Pause,
     Stop,
     Seek,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CliExportEncoding {
+    Pcm16,
+    Float32,
+}
+
+const fn full_frame_count() -> u64 {
+    u64::MAX
 }
 
 impl Request {
@@ -90,6 +112,9 @@ impl Request {
                 protocol_version, ..
             }
             | Self::DeleteClip {
+                protocol_version, ..
+            }
+            | Self::ExportWav {
                 protocol_version, ..
             }
             | Self::Transport {
@@ -230,6 +255,34 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 apply_and_save(&path, project, vec![ProjectCommand::RemoveClip { clip_id }])?;
             Ok(json!({"type": "clip_deleted", "clip_id": clip_id, "revision": revision}))
         }
+        Request::ExportWav {
+            path,
+            output,
+            encoding,
+            start_frame,
+            frame_count,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let snapshot = build_master_snapshot(&project, &path)?;
+            let encoding = match encoding {
+                CliExportEncoding::Pcm16 => ExportEncoding::Pcm16,
+                CliExportEncoding::Float32 => ExportEncoding::Float32,
+            };
+            let report = OfflineExporter::export_wav(
+                snapshot,
+                &output,
+                ExportRange {
+                    start_frame,
+                    frame_count,
+                },
+                encoding,
+            )
+            .map_err(|error| (3, "export_failed", error.message))?;
+            Ok(
+                json!({"type": "wav_exported", "output": output, "sample_rate": report.sample_rate, "channel_count": report.channel_count, "frame_count": report.frame_count}),
+            )
+        }
         Request::Transport {
             action,
             position_frames,
@@ -238,6 +291,96 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             json!({"type": "transport_requested", "action": format!("{action:?}").to_lowercase(), "position_frames": position_frames, "delivery": "offline_acknowledged"}),
         ),
     }
+}
+
+fn build_master_snapshot(
+    project: &Project,
+    project_path: &Path,
+) -> Result<std::sync::Arc<PlaybackSnapshot>, (i32, &'static str, String)> {
+    let project_directory = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let clips: Vec<_> = project
+        .tracks
+        .iter()
+        .flat_map(|track| &track.layers)
+        .flat_map(|layer| &layer.clips)
+        .collect();
+    let end_frame = clips
+        .iter()
+        .map(|clip| clip.start_sample.saturating_add(clip.duration_samples))
+        .max()
+        .unwrap_or(0);
+    let mut format = None;
+    let mut decoded = Vec::new();
+    for clip in clips {
+        let asset = project
+            .assets
+            .iter()
+            .find(|asset| asset.id == clip.asset_id)
+            .ok_or_else(|| {
+                (
+                    4,
+                    "command_failed",
+                    format!("asset {} is missing", clip.asset_id),
+                )
+            })?;
+        let jutsu_audio_model::AudioAssetSource::ManagedFile { path, .. } = &asset.source else {
+            return Err((
+                3,
+                "export_failed",
+                "only managed WAV clips can be exported in MVP".into(),
+            ));
+        };
+        let (metadata, samples) = AssetManager::decode_wav_samples(project_directory.join(path))
+            .map_err(project_error)?;
+        let current = (metadata.sample_rate, metadata.channels);
+        if format.is_some_and(|value| value != current) {
+            return Err((
+                3,
+                "export_failed",
+                "all MVP clips must share sample rate and channel count".into(),
+            ));
+        }
+        format = Some(current);
+        decoded.push((clip, metadata, samples));
+    }
+    let (sample_rate, channels) = format.unwrap_or((48_000, 2));
+    let sample_count = usize::try_from(end_frame)
+        .unwrap_or(usize::MAX)
+        .checked_mul(usize::from(channels))
+        .ok_or_else(|| (3, "export_failed", "project duration is too large".into()))?;
+    let mut master = vec![0.0_f32; sample_count];
+    for (clip, metadata, samples) in decoded {
+        let channels = usize::from(metadata.channels);
+        let source_start = usize::try_from(clip.source_start_sample)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(channels);
+        let length = usize::try_from(clip.duration_samples)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(channels);
+        let destination = usize::try_from(clip.start_sample)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(channels);
+        let available = samples
+            .len()
+            .saturating_sub(source_start)
+            .min(length)
+            .min(master.len().saturating_sub(destination));
+        let gain_db = clip
+            .parameters
+            .get("gain_db")
+            .and_then(|value| match value {
+                ParameterValue::Float(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let gain = 10_f32.powf(gain_db as f32 / 20.0);
+        for index in 0..available {
+            master[destination + index] += samples[source_start + index] * gain;
+        }
+    }
+    PlaybackSnapshot::new(sample_rate, channels, master.into())
+        .map(std::sync::Arc::new)
+        .map_err(|error| (3, "export_failed", error.message))
 }
 
 fn apply_and_save(

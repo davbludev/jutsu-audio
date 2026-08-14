@@ -1792,8 +1792,10 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "cpal",
+ "hound",
  "jutsu-audio-extensions",
  "jutsu-audio-model",
+ "tempfile",
 ]
 
 [[package]]

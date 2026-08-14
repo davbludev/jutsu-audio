@@ -6,7 +6,8 @@ use jutsu_audio_commands::{
     COMMAND_PROTOCOL_VERSION, CommandEnvelope, CommandId, ProjectCommand, ProjectCommandEngine,
 };
 use jutsu_audio_engine::{
-    PlaybackRenderer, PlaybackSnapshot, SnapshotExchange, SystemAudioOutput, TransportController,
+    ExportEncoding, ExportRange, OfflineExporter, PlaybackRenderer, PlaybackSnapshot,
+    SnapshotExchange, SystemAudioOutput, TransportController,
 };
 use jutsu_audio_model::{AssetId, AudioAssetSource, Clip, ClipId, ParameterValue, Project};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
@@ -176,6 +177,29 @@ impl JutsuAudioApp {
                 }
             },
             Err(error) => self.status = format!("Import failed: {}", error.message),
+        }
+    }
+
+    fn export_selected(&mut self) {
+        let Some(snapshot) = self.snapshots.current() else {
+            self.status = "Select a playable clip before export".into();
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("WAV audio", &["wav"])
+            .set_file_name("jutsu-audio-export.wav")
+            .save_file()
+        else {
+            return;
+        };
+        match OfflineExporter::export_wav(
+            snapshot,
+            path,
+            ExportRange::full(),
+            ExportEncoding::Pcm16,
+        ) {
+            Ok(report) => self.status = format!("Exported {} frames", report.frame_count),
+            Err(error) => self.status = format!("Export failed: {}", error.message),
         }
     }
 
@@ -383,6 +407,9 @@ impl JutsuAudioApp {
                         ui.add_space(12.0);
                         if ui.button("Save").clicked() {
                             self.save_project();
+                        }
+                        if ui.button("Export WAV").clicked() {
+                            self.export_selected();
                         }
                         if ui.button("Open").clicked() {
                             self.open_project();

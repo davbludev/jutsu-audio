@@ -160,6 +160,11 @@ impl SnapshotExchange {
     pub fn clear(&self) {
         self.0.store(None);
     }
+
+    #[must_use]
+    pub fn current(&self) -> Option<Arc<PlaybackSnapshot>> {
+        self.0.load_full()
+    }
 }
 
 pub struct PlaybackRenderer {
@@ -224,6 +229,106 @@ pub struct SystemAudioOutput {
     _stream: cpal::Stream,
     pub sample_rate: u32,
     pub channel_count: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportEncoding {
+    Pcm16,
+    Float32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExportRange {
+    pub start_frame: u64,
+    pub frame_count: u64,
+}
+
+impl ExportRange {
+    #[must_use]
+    pub const fn full() -> Self {
+        Self {
+            start_frame: 0,
+            frame_count: u64::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExportReport {
+    pub sample_rate: u32,
+    pub channel_count: u16,
+    pub frame_count: u64,
+}
+
+#[derive(Debug)]
+pub struct ExportError {
+    pub message: String,
+}
+
+pub struct OfflineExporter;
+
+impl OfflineExporter {
+    pub fn export_wav(
+        snapshot: Arc<PlaybackSnapshot>,
+        path: impl AsRef<std::path::Path>,
+        range: ExportRange,
+        encoding: ExportEncoding,
+    ) -> Result<ExportReport, ExportError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|error| ExportError {
+                message: format!("failed to create export directory: {error}"),
+            })?;
+        }
+        let channels = usize::from(snapshot.channel_count);
+        let total_frames = snapshot.samples.len() / channels;
+        let start = usize::try_from(range.start_frame)
+            .unwrap_or(usize::MAX)
+            .min(total_frames);
+        let requested = usize::try_from(range.frame_count).unwrap_or(usize::MAX);
+        let end = start.saturating_add(requested).min(total_frames);
+        let samples = &snapshot.samples[start * channels..end * channels];
+        let (bits_per_sample, sample_format) = match encoding {
+            ExportEncoding::Pcm16 => (16, hound::SampleFormat::Int),
+            ExportEncoding::Float32 => (32, hound::SampleFormat::Float),
+        };
+        let spec = hound::WavSpec {
+            channels: snapshot.channel_count,
+            sample_rate: snapshot.sample_rate,
+            bits_per_sample,
+            sample_format,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).map_err(|error| ExportError {
+            message: format!("failed to create WAV export: {error}"),
+        })?;
+        for &sample in samples {
+            let result = match encoding {
+                ExportEncoding::Float32 => writer.write_sample(sample.clamp(-1.0, 1.0)),
+                ExportEncoding::Pcm16 => {
+                    let normalized = sample.clamp(-1.0, 1.0);
+                    let quantized = if normalized <= -1.0 {
+                        i16::MIN
+                    } else {
+                        (normalized * f32::from(i16::MAX)).round() as i16
+                    };
+                    writer.write_sample(quantized)
+                }
+            };
+            result.map_err(|error| ExportError {
+                message: format!("failed to write WAV sample: {error}"),
+            })?;
+        }
+        writer.finalize().map_err(|error| ExportError {
+            message: format!("failed to finalize WAV export: {error}"),
+        })?;
+        Ok(ExportReport {
+            sample_rate: snapshot.sample_rate,
+            channel_count: snapshot.channel_count,
+            frame_count: (end - start) as u64,
+        })
+    }
 }
 
 impl SystemAudioOutput {

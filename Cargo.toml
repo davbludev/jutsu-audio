@@ -12,6 +12,7 @@ members = [
     "crates/jutsu-audio-engine",
     "crates/jutsu-audio-extensions",
     "crates/jutsu-audio-model",
+    "crates/jutsu-audio-project",
     "xtask",
 ]
 resolver = "3"

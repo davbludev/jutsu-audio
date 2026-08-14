@@ -4,6 +4,7 @@
 
 - `Cargo.toml`: workspace membership.
 - `crates/jutsu-audio-model`: portable project schema, stable IDs, and validation.
+- `crates/jutsu-audio-project`: atomic project persistence, migrations, backups, and portable asset-path checks.
 - `crates/jutsu-audio-commands`: atomic revisioned command application and change events.
 - `crates/jutsu-audio-extensions`: typed synth, effect, and generator contracts/registries.
 - `crates/jutsu-audio-engine`: immutable render snapshots and audio-graph foundations.

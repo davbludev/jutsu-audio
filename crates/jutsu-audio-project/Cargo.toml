@@ -1,0 +1,13 @@
+[package]
+name = "jutsu-audio-project"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+atomic-write-file = "0.3.1"
+jutsu-audio-model = { path = "../jutsu-audio-model" }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile = "3.27.0"

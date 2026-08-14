@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = "0.33.3"
+jutsu-audio-commands = { path = "crates/jutsu-audio-commands" }
+jutsu-audio-engine = { path = "crates/jutsu-audio-engine" }
+jutsu-audio-model = { path = "crates/jutsu-audio-model" }
+jutsu-audio-project = { path = "crates/jutsu-audio-project" }
+rfd = "0.17.2"
 
 [workspace]
 members = [

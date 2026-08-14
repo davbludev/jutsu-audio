@@ -1,6 +1,8 @@
 use std::fmt;
 
-use jutsu_audio_model::{Asset, AssetId, Clip, LayerId, Project, TrackId, ValidationDiagnostic};
+use jutsu_audio_model::{
+    Asset, AssetId, Clip, ClipId, LayerId, Project, TrackId, ValidationDiagnostic,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -58,6 +60,16 @@ pub enum ProjectCommand {
         track_id: TrackId,
         layer_id: LayerId,
         clip: Clip,
+    },
+    UpdateClip {
+        clip_id: ClipId,
+        start_sample: u64,
+        source_start_sample: u64,
+        duration_samples: u64,
+        gain_db: f64,
+    },
+    RemoveClip {
+        clip_id: ClipId,
     },
 }
 
@@ -320,6 +332,66 @@ fn apply_command(
                 kind: ChangeKind::Added,
                 entity_kind: EntityKind::Clip,
                 entity_id: clip.id.to_string(),
+            }
+        }
+        ProjectCommand::UpdateClip {
+            clip_id,
+            start_sample,
+            source_start_sample,
+            duration_samples,
+            gain_db,
+        } => {
+            let clip = project
+                .tracks
+                .iter_mut()
+                .flat_map(|track| &mut track.layers)
+                .flat_map(|layer| &mut layer.clips)
+                .find(|clip| clip.id == *clip_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("clip {clip_id} does not exist"),
+                    )
+                })?;
+            clip.start_sample = *start_sample;
+            clip.source_start_sample = *source_start_sample;
+            clip.duration_samples = *duration_samples;
+            clip.parameters.insert(
+                "gain_db".into(),
+                jutsu_audio_model::ParameterValue::Float(*gain_db),
+            );
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveClip { clip_id } => {
+            let clips = project
+                .tracks
+                .iter_mut()
+                .flat_map(|track| &mut track.layers)
+                .map(|layer| &mut layer.clips)
+                .find(|clips| clips.iter().any(|clip| clip.id == *clip_id))
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("clip {clip_id} does not exist"),
+                    )
+                })?;
+            let index = clips
+                .iter()
+                .position(|clip| clip.id == *clip_id)
+                .expect("found");
+            clips.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
             }
         }
     };

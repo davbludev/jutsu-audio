@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use atomic_write_file::AtomicWriteFile;
 use hound::{SampleFormat, WavReader};
 use jutsu_audio_model::{
-    Asset, AssetId, AudioAssetSource, BusId, CURRENT_PROJECT_SCHEMA_VERSION, MixerBus, Project,
-    ProjectId, ProjectMetadata, ValidationDiagnostic,
+    Asset, AssetId, AudioAssetSource, BusId, CURRENT_PROJECT_SCHEMA_VERSION, Layer, LayerId,
+    MixerBus, Project, ProjectId, ProjectMetadata, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -148,7 +148,17 @@ impl ProjectStore {
                 parameters: BTreeMap::new(),
             }],
             master_bus_id,
-            tracks: Vec::new(),
+            tracks: vec![Track {
+                id: TrackId::new(),
+                name: "Track 1".into(),
+                output_bus_id: master_bus_id,
+                parameters: BTreeMap::new(),
+                layers: vec![Layer {
+                    id: LayerId::new(),
+                    name: "Layer 1".into(),
+                    clips: Vec::new(),
+                }],
+            }],
         }
     }
 
@@ -244,6 +254,12 @@ impl ProjectStore {
 }
 
 impl AssetManager {
+    pub fn decode_wav_samples(
+        path: impl AsRef<Path>,
+    ) -> Result<(AudioMetadata, Vec<f32>), ProjectFileError> {
+        decode_wav(path.as_ref())
+    }
+
     pub fn prepare_wav_import(
         project: &Project,
         project_path: impl AsRef<Path>,

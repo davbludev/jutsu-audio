@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use jutsu_audio_commands::{
-    COMMAND_PROTOCOL_VERSION, CommandEnvelope, CommandId, ProjectCommand, ProjectCommandEngine,
-};
+use jutsu_audio_commands::ProjectCommand;
 use jutsu_audio_engine::{ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot};
 use jutsu_audio_model::{AssetId, Clip, ClipId, LayerId, ParameterValue, Project, TrackId};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
+use jutsu_audio_session::TransportAction as SessionTransportAction;
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::cli_session::{self, Applied};
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -67,9 +68,14 @@ enum Request {
     #[serde(rename = "transport_request")]
     Transport {
         protocol_version: u32,
+        path: PathBuf,
         action: TransportAction,
         #[serde(default)]
         position_frames: u64,
+    },
+    SessionStatus {
+        protocol_version: u32,
+        path: PathBuf,
     },
 }
 
@@ -118,6 +124,9 @@ impl Request {
                 protocol_version, ..
             }
             | Self::Transport {
+                protocol_version, ..
+            }
+            | Self::SessionStatus {
                 protocol_version, ..
             } => *protocol_version,
         }
@@ -185,9 +194,10 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 ImportStatus::Prepared => {
                     let asset = prepared.asset.expect("prepared import contains asset");
                     let asset_id = asset.id;
-                    apply_and_save(&path, project, vec![ProjectCommand::AddAsset { asset }])?;
+                    let applied =
+                        cli_session::apply(&path, vec![ProjectCommand::AddAsset { asset }])?;
                     Ok(
-                        json!({"type": "sample_imported", "status": "added", "asset_id": asset_id, "metadata": prepared.metadata}),
+                        json!({"type": "sample_imported", "status": "added", "asset_id": asset_id, "metadata": prepared.metadata, "revision": applied.revision, "delivery": applied.delivery}),
                     )
                 }
             }
@@ -203,7 +213,6 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             gain_db,
             ..
         } => {
-            let project = ProjectStore::open(&path).map_err(project_error)?.project;
             let clip = Clip {
                 id: ClipId::new(),
                 asset_id,
@@ -215,16 +224,15 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                     .collect(),
             };
             let clip_id = clip.id;
-            let revision = apply_and_save(
+            let applied = cli_session::apply(
                 &path,
-                project,
                 vec![ProjectCommand::AddClip {
                     track_id,
                     layer_id,
                     clip,
                 }],
             )?;
-            Ok(json!({"type": "clip_added", "clip_id": clip_id, "revision": revision}))
+            Ok(clip_result("clip_added", clip_id, &applied))
         }
         Request::UpdateClip {
             path,
@@ -235,10 +243,8 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             gain_db,
             ..
         } => {
-            let project = ProjectStore::open(&path).map_err(project_error)?.project;
-            let revision = apply_and_save(
+            let applied = cli_session::apply(
                 &path,
-                project,
                 vec![ProjectCommand::UpdateClip {
                     clip_id,
                     start_sample,
@@ -247,13 +253,11 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                     gain_db,
                 }],
             )?;
-            Ok(json!({"type": "clip_updated", "clip_id": clip_id, "revision": revision}))
+            Ok(clip_result("clip_updated", clip_id, &applied))
         }
         Request::DeleteClip { path, clip_id, .. } => {
-            let project = ProjectStore::open(&path).map_err(project_error)?.project;
-            let revision =
-                apply_and_save(&path, project, vec![ProjectCommand::RemoveClip { clip_id }])?;
-            Ok(json!({"type": "clip_deleted", "clip_id": clip_id, "revision": revision}))
+            let applied = cli_session::apply(&path, vec![ProjectCommand::RemoveClip { clip_id }])?;
+            Ok(clip_result("clip_deleted", clip_id, &applied))
         }
         Request::ExportWav {
             path,
@@ -284,12 +288,43 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             )
         }
         Request::Transport {
+            path,
             action,
             position_frames,
             ..
-        } => Ok(
-            json!({"type": "transport_requested", "action": format!("{action:?}").to_lowercase(), "position_frames": position_frames, "delivery": "offline_acknowledged"}),
-        ),
+        } => {
+            let delivery = cli_session::transport(&path, action.into(), position_frames)?;
+            Ok(
+                json!({"type": "transport_requested", "action": format!("{action:?}").to_lowercase(), "position_frames": position_frames, "delivery": delivery}),
+            )
+        }
+        Request::SessionStatus { path, .. } => {
+            let live = cli_session::status(&path)?;
+            Ok(match live {
+                Some(payload) => {
+                    json!({"type": "session_status", "attached": true, "session": payload})
+                }
+                None => {
+                    json!({"type": "session_status", "attached": false, "session": Value::Null})
+                }
+            })
+        }
+    }
+}
+
+/// Every clip operation answers in the same shape, whichever route it took.
+fn clip_result(kind: &str, clip_id: ClipId, applied: &Applied) -> Value {
+    json!({"type": kind, "clip_id": clip_id, "revision": applied.revision, "delivery": applied.delivery})
+}
+
+impl From<TransportAction> for SessionTransportAction {
+    fn from(action: TransportAction) -> Self {
+        match action {
+            TransportAction::Play => Self::Play,
+            TransportAction::Pause => Self::Pause,
+            TransportAction::Stop => Self::Stop,
+            TransportAction::Seek => Self::Seek,
+        }
     }
 }
 
@@ -381,25 +416,6 @@ fn build_master_snapshot(
     PlaybackSnapshot::new(sample_rate, channels, master.into())
         .map(std::sync::Arc::new)
         .map_err(|error| (3, "export_failed", error.message))
-}
-
-fn apply_and_save(
-    path: &Path,
-    project: Project,
-    commands: Vec<ProjectCommand>,
-) -> Result<u64, (i32, &'static str, String)> {
-    let mut engine =
-        ProjectCommandEngine::new(project).map_err(|error| (4, "command_failed", error.message))?;
-    let outcome = engine
-        .apply(CommandEnvelope {
-            protocol_version: COMMAND_PROTOCOL_VERSION,
-            command_id: CommandId::new(),
-            expected_revision: 0,
-            commands,
-        })
-        .map_err(|error| (4, "command_failed", error.message))?;
-    ProjectStore::save(path, engine.project()).map_err(project_error)?;
-    Ok(outcome.revision)
 }
 
 fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static str, String) {

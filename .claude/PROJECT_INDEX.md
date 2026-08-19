@@ -26,6 +26,9 @@ it has moved.
 - `src/cli.rs` + `src/bin/jutsu-audio-cli.rs` — the machine surface. Reached through
   `src/lib.rs`, which exists only to expose `cli` to the binary and to `tests/cli_protocol.rs`.
   Request variants are tagged with `"operation"`, not `"type"`.
+- `src/cli_session.rs` — the only place that decides between editing through a live editor and
+  editing the file under the write lock. Every mutating CLI operation goes through
+  `cli_session::apply`; the `delivery` field in the response says which route it took.
 
 Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audio.json`.
 

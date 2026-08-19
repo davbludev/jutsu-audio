@@ -59,3 +59,64 @@ fn malformed_requests_return_json_error_and_documented_exit_code() {
     assert_eq!(response["error"]["code"], "invalid_request");
     assert!(response["error"]["message"].as_str().is_some());
 }
+
+#[test]
+fn edits_report_the_route_they_took_and_the_revision_they_produced() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let source = directory.path().join("blip.wav");
+    write_test_wav(&source);
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }));
+
+    let (code, imported) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "import_sample",
+        "path": path,
+        "source": source
+    }));
+    assert_eq!(code, 0, "{imported}");
+    assert_eq!(imported["result"]["status"], "added");
+    assert_eq!(imported["result"]["delivery"], "offline");
+    assert_eq!(imported["result"]["revision"], 1);
+}
+
+#[test]
+fn session_status_reports_that_no_editor_owns_the_project() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }));
+
+    let (code, status) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "session_status",
+        "path": path
+    }));
+    assert_eq!(code, 0);
+    assert_eq!(status["result"]["type"], "session_status");
+    assert_eq!(status["result"]["attached"], false);
+    assert!(status["result"]["session"].is_null());
+}
+
+fn write_test_wav(path: &std::path::Path) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    for frame in 0..480_i32 {
+        writer.write_sample((frame * 16) as i16).unwrap();
+    }
+    writer.finalize().unwrap();
+}

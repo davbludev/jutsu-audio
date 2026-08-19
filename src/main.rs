@@ -355,6 +355,7 @@ impl JutsuAudioApp {
                 name: "Layer 1".into(),
                 clips: Vec::new(),
             }],
+            effects: Vec::new(),
         };
         if self.apply(vec![ProjectCommand::AddTrack { track }]) {
             self.status = Status::info("Track added");

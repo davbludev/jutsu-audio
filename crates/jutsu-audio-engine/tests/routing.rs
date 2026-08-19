@@ -45,6 +45,7 @@ fn fixture() -> Fixture {
                 name: "Master".into(),
                 output_bus_id: None,
                 parameters: BTreeMap::new(),
+                effects: Vec::new(),
             }],
             master_bus_id: master,
             tracks: Vec::new(),
@@ -64,6 +65,7 @@ impl Fixture {
             name: name.into(),
             output_bus_id: output,
             parameters: BTreeMap::new(),
+            effects: Vec::new(),
         });
         id
     }
@@ -89,6 +91,7 @@ impl Fixture {
                     notes: Vec::new(),
                 }],
             }],
+            effects: Vec::new(),
         });
         id
     }

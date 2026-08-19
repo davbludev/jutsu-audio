@@ -140,6 +140,7 @@ impl ProjectStore {
                 name: "Master".into(),
                 output_bus_id: None,
                 parameters: BTreeMap::new(),
+                effects: Vec::new(),
             }],
             master_bus_id,
             tracks: vec![Track {
@@ -152,6 +153,7 @@ impl ProjectStore {
                     name: "Layer 1".into(),
                     clips: Vec::new(),
                 }],
+                effects: Vec::new(),
             }],
             markers: Vec::new(),
             loop_region: None,

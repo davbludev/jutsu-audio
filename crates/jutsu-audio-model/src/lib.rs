@@ -53,6 +53,7 @@ entity_id!(ClipId);
 entity_id!(BusId);
 entity_id!(MarkerId);
 entity_id!(AutomationId);
+entity_id!(EffectId);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Project {
@@ -263,6 +264,15 @@ impl Project {
         validate_unique_ids(
             self.automation.iter().map(|lane| lane.id),
             "automation",
+            &mut diagnostics,
+        );
+        validate_unique_ids(
+            self.tracks
+                .iter()
+                .flat_map(|track| &track.effects)
+                .chain(self.buses.iter().flat_map(|bus| &bus.effects))
+                .map(|effect| effect.id),
+            "effects",
             &mut diagnostics,
         );
         for (lane_index, lane) in self.automation.iter().enumerate() {
@@ -487,6 +497,38 @@ pub struct Track {
     pub parameters: BTreeMap<String, ParameterValue>,
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// Insert effects, in the order the audio passes through them. Omitted
+    /// when empty, so a project without effects is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectInsert>,
+}
+
+/// One effect in a chain: what it is, how it is set, and how much of it is
+/// heard.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EffectInsert {
+    pub id: EffectId,
+    /// Registered extension type, e.g. `builtin.lowpass`.
+    pub type_id: String,
+    /// The descriptor version these parameters were written against. A build
+    /// whose extension has moved on can say so rather than guess.
+    pub state_version: u32,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, ParameterValue>,
+    /// Bypassed inserts stay in the chain, in place, doing nothing.
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    /// How much of the processed signal is heard, `0.0` dry to `1.0` wet.
+    #[serde(default = "fully_wet")]
+    pub wet: f64,
+}
+
+const fn enabled_by_default() -> bool {
+    true
+}
+
+const fn fully_wet() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -529,6 +571,9 @@ pub struct MixerBus {
     pub output_bus_id: Option<BusId>,
     #[serde(default)]
     pub parameters: BTreeMap<String, ParameterValue>,
+    /// Insert effects on the bus, applied to everything routed through it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectInsert>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

@@ -182,8 +182,31 @@ pub trait Synth: Send {
     fn render(&mut self, events: &[NoteEvent], output: &mut [f32]);
 }
 
+/// One processor in a chain.
+///
+/// `prepare` runs before the first block and whenever the rate changes;
+/// `reset` clears everything a previous render left behind, which is what makes
+/// an offline render match a real-time one. `process` works in place on one
+/// channel: an insert on a stereo strip gets one instance per channel, so the
+/// two never share state.
+///
+/// `latency_frames` and `tail_frames` are how a chain reports what it does to
+/// time — a look-ahead that delays the signal, and a decay that outlives its
+/// input. Both default to zero, which is the truth for most effects.
 pub trait Effect: Send {
-    fn process_mono(&mut self, samples: &mut [f32]);
+    fn prepare(&mut self, sample_rate: u32);
+
+    fn reset(&mut self);
+
+    fn process(&mut self, samples: &mut [f32]);
+
+    fn latency_frames(&self) -> u32 {
+        0
+    }
+
+    fn tail_frames(&self) -> u32 {
+        0
+    }
 }
 
 pub trait Generator: Send {

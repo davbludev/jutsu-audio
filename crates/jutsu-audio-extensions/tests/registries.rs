@@ -62,7 +62,11 @@ struct MockEffectFactory(ExtensionDescriptor);
 struct MockEffect;
 
 impl Effect for MockEffect {
-    fn process_mono(&mut self, samples: &mut [f32]) {
+    fn prepare(&mut self, _sample_rate: u32) {}
+
+    fn reset(&mut self) {}
+
+    fn process(&mut self, samples: &mut [f32]) {
         for sample in samples {
             *sample *= 2.0;
         }
@@ -156,7 +160,7 @@ fn typed_registries_register_describe_and_instantiate_all_extension_kinds() {
         .instantiate_effect(&effect_id, &BTreeMap::new())
         .unwrap();
     let mut effect_output = [1.0, -1.0];
-    effect.process_mono(&mut effect_output);
+    effect.process(&mut effect_output);
     assert_eq!(effect_output, [2.0, -2.0]);
 
     let generator = registries

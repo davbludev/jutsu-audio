@@ -2,8 +2,8 @@ use std::fmt;
 
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, AutomationId, AutomationLane, Breakpoint, BusId, Clip,
-    ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker, MarkerId, MixerBus, ParameterValue,
-    Project, Track, TrackId, ValidationDiagnostic,
+    ClipId, ClipNote, EffectId, EffectInsert, Layer, LayerId, LoopRegion, Marker, MarkerId,
+    MixerBus, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -182,6 +182,43 @@ pub enum ProjectCommand {
         automation_id: AutomationId,
         points: Vec<Breakpoint>,
     },
+    /// Appends an insert to a track or bus chain.
+    AddEffect {
+        target: EffectTarget,
+        effect: EffectInsert,
+    },
+    RemoveEffect {
+        effect_id: EffectId,
+    },
+    /// Moves an insert within its own chain. Order is what a chain *is*, so it
+    /// is an edit like any other.
+    MoveEffect {
+        effect_id: EffectId,
+        to_index: usize,
+    },
+    SetEffectEnabled {
+        effect_id: EffectId,
+        enabled: bool,
+    },
+    /// How much of the processed signal is heard, `0.0` dry to `1.0` wet.
+    SetEffectWet {
+        effect_id: EffectId,
+        wet: f64,
+    },
+    /// Replaces an insert's parameters. Whether the values suit the extension
+    /// is decided where the registry lives, before this is sent.
+    SetEffectParameters {
+        effect_id: EffectId,
+        parameters: std::collections::BTreeMap<String, ParameterValue>,
+    },
+}
+
+/// Which chain an insert belongs to.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EffectTarget {
+    Track { track_id: TrackId },
+    Bus { bus_id: BusId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -204,6 +241,7 @@ pub enum EntityKind {
     LoopRegion,
     Bus,
     Automation,
+    Effect,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -847,6 +885,74 @@ pub(crate) fn apply_command(
                 entity_id: automation_id.to_string(),
             }
         }
+        ProjectCommand::AddEffect { target, effect } => {
+            let chain = chain_of(project, *target, command_index)?;
+            chain.push(effect.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveEffect { effect_id } => {
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            chain.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::MoveEffect {
+            effect_id,
+            to_index,
+        } => {
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            let effect = chain.remove(index);
+            let destination = (*to_index).min(chain.len());
+            chain.insert(destination, effect);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::SetEffectEnabled { effect_id, enabled } => {
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            chain[index].enabled = *enabled;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::SetEffectWet { effect_id, wet } => {
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            chain[index].wet = wet.clamp(0.0, 1.0);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::SetEffectParameters {
+            effect_id,
+            parameters,
+        } => {
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            chain[index].parameters.clone_from(parameters);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
         ProjectCommand::RemoveClip { clip_id } => {
             let clips = project
                 .tracks
@@ -935,4 +1041,46 @@ fn find_bus(
                 format!("bus {bus_id} does not exist"),
             )
         })
+}
+
+/// The chain an effect target names.
+fn chain_of(
+    project: &mut Project,
+    target: EffectTarget,
+    command_index: usize,
+) -> Result<&mut Vec<EffectInsert>, CommandError> {
+    match target {
+        EffectTarget::Track { track_id } => {
+            find_track(project, track_id, command_index).map(|track| &mut track.effects)
+        }
+        EffectTarget::Bus { bus_id } => {
+            find_bus(project, bus_id, command_index).map(|bus| &mut bus.effects)
+        }
+    }
+}
+
+/// The chain holding an insert, and where in it the insert sits.
+fn locate_effect(
+    project: &mut Project,
+    effect_id: EffectId,
+    command_index: usize,
+) -> Result<(&mut Vec<EffectInsert>, usize), CommandError> {
+    let chain = project
+        .tracks
+        .iter_mut()
+        .map(|track| &mut track.effects)
+        .chain(project.buses.iter_mut().map(|bus| &mut bus.effects))
+        .find(|chain| chain.iter().any(|effect| effect.id == effect_id))
+        .ok_or_else(|| {
+            CommandError::at_command(
+                CommandErrorCode::EntityNotFound,
+                command_index,
+                format!("effect {effect_id} does not exist"),
+            )
+        })?;
+    let index = chain
+        .iter()
+        .position(|effect| effect.id == effect_id)
+        .expect("found");
+    Ok((chain, index))
 }

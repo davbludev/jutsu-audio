@@ -18,6 +18,7 @@ use jutsu_audio_model::{
     Project, Track, TrackId,
 };
 
+use crate::effects::{ChainTiming, MixDiagnostic, apply_chain};
 use crate::{PlaybackSnapshot, SnapshotError};
 
 /// Everything mixes to stereo for now; the mixer phase introduces real bus
@@ -101,6 +102,13 @@ pub struct MixOutput {
     /// `None` when nothing was audible, which is not a failure.
     pub snapshot: Option<PlaybackSnapshot>,
     pub meters: Meters,
+    /// What the mix could not do as asked — a missing effect, a version that
+    /// moved on — having done the next best thing.
+    pub diagnostics: Vec<MixDiagnostic>,
+    /// What the effect chains do to time, summed across the whole mix. Nothing
+    /// is compensated here: an offline render lays everything on one timeline,
+    /// and a caller aligning against live playback needs the numbers.
+    pub timing: ChainTiming,
 }
 
 /// Sums a project into one interleaved stereo snapshot at `sample_rate`.
@@ -132,6 +140,8 @@ pub fn mix_project_metered(
         return Ok(MixOutput {
             snapshot: None,
             meters: Meters::default(),
+            diagnostics: Vec::new(),
+            timing: ChainTiming::default(),
         });
     }
     let samples = total_frames * usize::from(MIX_CHANNELS);
@@ -147,6 +157,8 @@ pub fn mix_project_metered(
     let mut meters = Meters::default();
     let mut track_buffer = vec![0.0_f32; samples];
     let mut master = None;
+    let mut diagnostics = Vec::new();
+    let mut timing = ChainTiming::default();
 
     for track in &audible {
         track_buffer.fill(0.0);
@@ -161,6 +173,16 @@ pub fn mix_project_metered(
                 &mut load,
             )?;
         }
+        // Inserts first, then the strip: a fader move should change how loud
+        // the processed signal is, not how hard it hits the processing.
+        let track_timing = apply_chain(
+            &mut track_buffer,
+            &track.effects,
+            extensions,
+            sample_rate,
+            &mut diagnostics,
+        );
+        timing = combine(timing, track_timing);
         apply_strip(
             &mut track_buffer,
             &track.parameters,
@@ -183,6 +205,21 @@ pub fn mix_project_metered(
             .iter()
             .find(|bus| bus.id == bus_id)
             .map(|bus| &bus.parameters);
+        if let Some(effects) = project
+            .buses
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .map(|bus| &bus.effects)
+        {
+            let bus_timing = apply_chain(
+                &mut buffer,
+                effects,
+                extensions,
+                sample_rate,
+                &mut diagnostics,
+            );
+            timing = combine(timing, bus_timing);
+        }
         if let Some(parameters) = parameters {
             apply_strip(
                 &mut buffer,
@@ -215,6 +252,8 @@ pub fn mix_project_metered(
         return Ok(MixOutput {
             snapshot: None,
             meters,
+            diagnostics,
+            timing,
         });
     };
     let snapshot = PlaybackSnapshot::new(sample_rate, MIX_CHANNELS, Arc::from(master))
@@ -222,6 +261,8 @@ pub fn mix_project_metered(
     Ok(MixOutput {
         snapshot: Some(snapshot),
         meters,
+        diagnostics,
+        timing,
     })
 }
 
@@ -308,6 +349,18 @@ fn render_one_clip(
         }
     }
     Ok(())
+}
+
+/// Latency adds up along a signal path; a tail is the longest one, not the sum.
+const fn combine(left: ChainTiming, right: ChainTiming) -> ChainTiming {
+    ChainTiming {
+        latency_frames: left.latency_frames.saturating_add(right.latency_frames),
+        tail_frames: if left.tail_frames > right.tail_frames {
+            left.tail_frames
+        } else {
+            right.tail_frames
+        },
+    }
 }
 
 /// The lanes writing to one target, in project order.

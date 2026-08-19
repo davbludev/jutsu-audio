@@ -29,6 +29,7 @@ fn valid_project() -> Project {
             name: "Master".into(),
             output_bus_id: None,
             parameters: BTreeMap::from([("gain_db".into(), ParameterValue::Float(0.0))]),
+            effects: Vec::new(),
         }],
         master_bus_id: bus_id,
         markers: Vec::new(),
@@ -55,6 +56,7 @@ fn valid_project() -> Project {
                     ]),
                 }],
             }],
+            effects: Vec::new(),
         }],
     }
 }

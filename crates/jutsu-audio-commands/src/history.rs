@@ -388,6 +388,52 @@ fn invert_command(
                 points: lane.points.clone(),
             }
         }
+        ProjectCommand::AddEffect { effect, .. } => ProjectCommand::RemoveEffect {
+            effect_id: effect.id,
+        },
+        ProjectCommand::RemoveEffect { effect_id } => {
+            let (target, effect, index) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            // Removing then re-adding would put it back at the end; the move
+            // that follows puts it back where it was.
+            let _ = index;
+            ProjectCommand::AddEffect {
+                target,
+                effect: effect.clone(),
+            }
+        }
+        ProjectCommand::MoveEffect { effect_id, .. } => {
+            let (_, _, index) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            ProjectCommand::MoveEffect {
+                effect_id: *effect_id,
+                to_index: index,
+            }
+        }
+        ProjectCommand::SetEffectEnabled { effect_id, .. } => {
+            let (_, effect, _) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            ProjectCommand::SetEffectEnabled {
+                effect_id: *effect_id,
+                enabled: effect.enabled,
+            }
+        }
+        ProjectCommand::SetEffectWet { effect_id, .. } => {
+            let (_, effect, _) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            ProjectCommand::SetEffectWet {
+                effect_id: *effect_id,
+                wet: effect.wet,
+            }
+        }
+        ProjectCommand::SetEffectParameters { effect_id, .. } => {
+            let (_, effect, _) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            ProjectCommand::SetEffectParameters {
+                effect_id: *effect_id,
+                parameters: effect.parameters.clone(),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
@@ -431,4 +477,34 @@ fn find_track(project: &Project, track_id: TrackId) -> Option<&Track> {
 
 fn flag(track: &Track, key: &str) -> bool {
     matches!(track.parameters.get(key), Some(ParameterValue::Bool(true)))
+}
+
+/// An insert, the chain it belongs to, and where in that chain it sits.
+fn find_effect(
+    project: &Project,
+    effect_id: jutsu_audio_model::EffectId,
+) -> Option<(crate::EffectTarget, &jutsu_audio_model::EffectInsert, usize)> {
+    for track in &project.tracks {
+        if let Some(index) = track
+            .effects
+            .iter()
+            .position(|effect| effect.id == effect_id)
+        {
+            return Some((
+                crate::EffectTarget::Track { track_id: track.id },
+                &track.effects[index],
+                index,
+            ));
+        }
+    }
+    for bus in &project.buses {
+        if let Some(index) = bus.effects.iter().position(|effect| effect.id == effect_id) {
+            return Some((
+                crate::EffectTarget::Bus { bus_id: bus.id },
+                &bus.effects[index],
+                index,
+            ));
+        }
+    }
+    None
 }

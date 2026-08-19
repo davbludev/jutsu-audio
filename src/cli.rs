@@ -617,6 +617,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                     name: "Layer 1".into(),
                     clips: Vec::new(),
                 }],
+                effects: Vec::new(),
             };
             let track_id = track.id;
             let layer_id = track.layers[0].id;

@@ -24,6 +24,7 @@ fn project() -> Project {
             name: "Master".into(),
             output_bus_id: None,
             parameters: BTreeMap::new(),
+            effects: Vec::new(),
         }],
         master_bus_id: bus_id,
         markers: Vec::new(),
@@ -39,6 +40,7 @@ fn project() -> Project {
                 name: "Layer".into(),
                 clips: vec![],
             }],
+            effects: Vec::new(),
         }],
     }
 }

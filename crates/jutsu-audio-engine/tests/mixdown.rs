@@ -34,6 +34,7 @@ fn builder() -> Builder {
                 name: "Master".into(),
                 output_bus_id: None,
                 parameters: BTreeMap::new(),
+                effects: Vec::new(),
             }],
             master_bus_id: bus_id,
             markers: Vec::new(),
@@ -59,6 +60,7 @@ impl Builder {
                 name: "Layer".into(),
                 clips: vec![clip],
             }],
+            effects: Vec::new(),
         });
         let _ = asset_id;
         self.project.tracks.len() - 1
@@ -133,6 +135,7 @@ fn track_with(bus_id: &BusId, clip: Clip) -> Track {
             name: "Layer".into(),
             clips: vec![clip],
         }],
+        effects: Vec::new(),
     }
 }
 

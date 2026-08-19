@@ -40,6 +40,7 @@ fn project() -> (Project, TrackId, BusId) {
                 name: "Master".into(),
                 output_bus_id: None,
                 parameters: BTreeMap::new(),
+                effects: Vec::new(),
             }],
             master_bus_id: master,
             tracks: vec![Track {
@@ -60,6 +61,7 @@ fn project() -> (Project, TrackId, BusId) {
                         notes: Vec::new(),
                     }],
                 }],
+                effects: Vec::new(),
             }],
             markers: Vec::new(),
             loop_region: None,

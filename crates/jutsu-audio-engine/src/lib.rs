@@ -7,8 +7,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jutsu_audio_extensions::ExtensionTypeId;
 use jutsu_audio_model::{AssetId, BusId, ClipId, LoopRegion, ParameterValue, ProjectId};
 
+pub mod effects;
 pub mod mixdown;
 
+pub use effects::{ChainTiming, MixDiagnostic, MixDiagnosticCode};
 pub use mixdown::{
     MIX_CHANNELS, Meters, MixError, MixErrorCode, MixOutput, SourceAudio, mix_project,
     mix_project_metered,

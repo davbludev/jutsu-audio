@@ -1639,6 +1639,21 @@ impl JutsuAudioApp {
                         .font(theme::mono(11.0))
                         .color(theme::FAINT),
                     );
+                    // Musical time, from the same conversion the CLI reports.
+                    let tempo = self.project().tempo_map();
+                    let position = tempo.position_at(self.transport.position_frames(), rate);
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(position.format())
+                            .font(theme::mono(11.0))
+                            .color(theme::DIM),
+                    )
+                    .on_hover_text(format!(
+                        "bar.beat.tick at {:.3} BPM, {}/{}",
+                        tempo.at(self.transport.position_frames()).beats_per_minute,
+                        tempo.at(self.transport.position_frames()).beats_per_bar,
+                        tempo.at(self.transport.position_frames()).beat_unit
+                    ));
 
                     ui.add_space(10.0);
                     ui.label(

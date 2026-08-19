@@ -66,6 +66,7 @@ fn project() -> (Project, TrackId, BusId) {
             markers: Vec::new(),
             loop_region: None,
             automation: Vec::new(),
+            tempo: Vec::new(),
         },
         track_id,
         master,

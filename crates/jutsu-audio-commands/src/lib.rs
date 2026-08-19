@@ -3,7 +3,7 @@ use std::fmt;
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, AutomationId, AutomationLane, Breakpoint, BusId, Clip,
     ClipId, ClipNote, EffectId, EffectInsert, Layer, LayerId, LoopRegion, Marker, MarkerId,
-    MixerBus, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
+    MixerBus, ParameterValue, Project, TempoChange, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -210,6 +210,11 @@ pub enum ProjectCommand {
     SetEffectParameters {
         effect_id: EffectId,
         parameters: std::collections::BTreeMap<String, ParameterValue>,
+    },
+    /// Replaces the whole tempo map. One command rather than per-change edits:
+    /// tempo is read as a whole, and editing it is one undo step.
+    SetTempoMap {
+        changes: Vec<TempoChange>,
     },
 }
 
@@ -951,6 +956,18 @@ pub(crate) fn apply_command(
                 kind: ChangeKind::Updated,
                 entity_kind: EntityKind::Effect,
                 entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTempoMap { changes } => {
+            project.tempo.clone_from(changes);
+            // Sorted here so every reader can assume order, the same way
+            // automation points are.
+            project.tempo.sort_by_key(|change| change.frame);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Project,
+                entity_id: project.id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

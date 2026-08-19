@@ -203,6 +203,7 @@ fn reference_project() -> Project {
         markers: Vec::new(),
         loop_region: None,
         automation: vec![automation],
+        tempo: Vec::new(),
     }
 }
 

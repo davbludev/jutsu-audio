@@ -10,8 +10,8 @@ use jutsu_audio_engine::{
 use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, AutomationId, AutomationTarget, Breakpoint, BusId, Clip, ClipId,
-    ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
-    Project, Track, TrackId,
+    ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
+    ParameterValue, Project, TempoChange, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -268,6 +268,22 @@ enum Request {
     },
     /// The parameters every track and bus strip has.
     DescribeStrip { protocol_version: u32 },
+    /// Replaces the tempo map. An empty list means the default: 120 BPM, 4/4.
+    SetTempoMap {
+        protocol_version: u32,
+        path: PathBuf,
+        changes: Vec<CliTempoChange>,
+    },
+    /// Converts between frames and musical time, both ways, using the
+    /// project's own tempo — the same conversion the editor displays.
+    ConvertTime {
+        protocol_version: u32,
+        path: PathBuf,
+        #[serde(default)]
+        frame: Option<u64>,
+        #[serde(default)]
+        position: Option<CliPosition>,
+    },
     DescribeEffect {
         protocol_version: u32,
         type_id: String,
@@ -374,6 +390,47 @@ impl From<CliEffectTarget> for EffectTarget {
             CliEffectTarget::Bus { bus_id } => Self::Bus { bus_id },
         }
     }
+}
+
+/// A tempo change as a caller writes it.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliTempoChange {
+    pub frame: u64,
+    pub beats_per_minute: f64,
+    #[serde(default = "four")]
+    pub beats_per_bar: u32,
+    #[serde(default = "four")]
+    pub beat_unit: u32,
+}
+
+const fn four() -> u32 {
+    4
+}
+
+impl From<CliTempoChange> for TempoChange {
+    fn from(change: CliTempoChange) -> Self {
+        Self {
+            frame: change.frame,
+            beats_per_minute: change.beats_per_minute,
+            beats_per_bar: change.beats_per_bar,
+            beat_unit: change.beat_unit,
+        }
+    }
+}
+
+/// A musical position as a caller writes it: bars and beats from one, ticks
+/// from zero.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliPosition {
+    pub bar: u64,
+    #[serde(default = "one")]
+    pub beat: u64,
+    #[serde(default)]
+    pub tick: u32,
+}
+
+const fn one() -> u64 {
+    1
 }
 
 /// A breakpoint as a caller writes it.
@@ -583,6 +640,12 @@ impl Request {
                 protocol_version, ..
             }
             | Self::RemoveAutomationLane {
+                protocol_version, ..
+            } => *protocol_version,
+            Self::SetTempoMap {
+                protocol_version, ..
+            }
+            | Self::ConvertTime {
                 protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
@@ -1513,6 +1576,69 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "automation_lane_removed", "automation_id": automation_id, "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
+        Request::SetTempoMap { path, changes, .. } => {
+            let changes: Vec<TempoChange> = changes.into_iter().map(TempoChange::from).collect();
+            if let Some(bad) = changes
+                .iter()
+                .find(|change| change.beats_per_minute <= 0.0 || change.beats_per_bar == 0)
+            {
+                return Err((
+                    6,
+                    "invalid_parameter",
+                    format!(
+                        "a tempo change needs a positive tempo and at least one beat per bar; got {} BPM in {}/{}",
+                        bad.beats_per_minute, bad.beats_per_bar, bad.beat_unit
+                    ),
+                ));
+            }
+            let count = changes.len();
+            let applied = cli_session::apply(&path, vec![ProjectCommand::SetTempoMap { changes }])?;
+            Ok(
+                json!({"type": "tempo_map_set", "change_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::ConvertTime {
+            path,
+            frame,
+            position,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let rate = project_sample_rate(&project);
+            let map = project.tempo_map();
+
+            let frame = match (frame, position) {
+                (Some(frame), _) => frame,
+                (None, Some(position)) => map.frame_at_position(
+                    MusicalPosition {
+                        bar: position.bar,
+                        beat: position.beat,
+                        tick: position.tick,
+                    },
+                    rate,
+                ),
+                (None, None) => {
+                    return Err((
+                        2,
+                        "invalid_request",
+                        "convert_time needs either a frame or a position".into(),
+                    ));
+                }
+            };
+            let musical = map.position_at(frame, rate);
+            let tempo = map.at(frame);
+            Ok(json!({
+                "type": "time_converted",
+                "frame": frame,
+                "seconds": frame as f64 / f64::from(rate.max(1)),
+                "beats": map.beats_at(frame, rate),
+                "position": {"bar": musical.bar, "beat": musical.beat, "tick": musical.tick},
+                "formatted": musical.format(),
+                "beats_per_minute": tempo.beats_per_minute,
+                "time_signature": format!("{}/{}", tempo.beats_per_bar, tempo.beat_unit),
+                "sample_rate": rate,
+            }))
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -1613,4 +1739,17 @@ fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static
 /// clip — is a command failure, the same shape the engine reports.
 fn command_failed(error: CommandError) -> (i32, &'static str, String) {
     (4, "command_failed", error.message)
+}
+
+/// The rate a project counts frames in: its first managed asset's, or 48 kHz
+/// when it has none. The editor infers it the same way.
+fn project_sample_rate(project: &Project) -> u32 {
+    project
+        .assets
+        .iter()
+        .find_map(|asset| match &asset.source {
+            AudioAssetSource::ManagedFile { sample_rate, .. } => Some(*sample_rate),
+            _ => None,
+        })
+        .unwrap_or(48_000)
 }

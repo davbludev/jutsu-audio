@@ -56,6 +56,7 @@ fn fixture() -> Fixture {
             markers: Vec::new(),
             loop_region: None,
             automation: Vec::new(),
+            tempo: Vec::new(),
             tracks: vec![Track {
                 id: track_id,
                 name: "SFX".into(),

@@ -52,6 +52,7 @@ fn fixture() -> Fixture {
             markers: Vec::new(),
             loop_region: None,
             automation: Vec::new(),
+            tempo: Vec::new(),
         },
     }
 }

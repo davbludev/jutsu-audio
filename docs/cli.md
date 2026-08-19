@@ -121,3 +121,17 @@ chain is, so `move_effect` is an ordinary edit.
 Automation: `add_automation_lane` takes a target, a parameter and optional breakpoints;
 `set_automation_points` replaces a lane's curve in one command, and `remove_automation_lane`
 deletes it. Points are stored in frame order whatever order they arrive in.
+
+## Musical time
+
+`set_tempo_map` replaces the project's tempo and time-signature changes in one command; an empty
+list means the default, 120 BPM in 4/4. Changes are stored in frame order whatever order they
+arrive in, and a change with a non-positive tempo is refused.
+
+`convert_time` converts either way: give it a `frame` or a `position` (`bar`, `beat`, `tick`) and
+it answers with both, plus seconds, beats, the tempo in force there, and the formatted
+`bar.beat.tick`. That formatting comes from the same conversion the editor's status bar uses, so
+the two can never disagree about where bar 9 starts.
+
+A tempo or signature change begins a bar: whatever was left of the bar it lands in counts as a
+short bar of its own. That is what makes position and frame exact inverses of each other.

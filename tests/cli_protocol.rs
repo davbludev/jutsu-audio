@@ -773,6 +773,79 @@ fn an_effect_this_build_does_not_have_is_refused_with_what_it_does_have() {
     );
 }
 
+#[test]
+fn musical_time_converts_both_ways_and_follows_the_tempo_map() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Song"
+    }));
+
+    // A project that never mentions tempo still has one: 120 BPM in 4/4.
+    let (code, default) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "convert_time",
+        "path": path,
+        "frame": 96_000
+    }));
+    assert_eq!(code, 0, "{default}");
+    assert_eq!(default["result"]["beats_per_minute"], 120.0);
+    assert_eq!(default["result"]["formatted"], "2.1.000");
+    assert_eq!(default["result"]["position"]["bar"], 2);
+
+    let (code, set) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_tempo_map",
+        "path": path,
+        "changes": [
+            {"frame": 96_000, "beats_per_minute": 90.0, "beats_per_bar": 3},
+            {"frame": 0, "beats_per_minute": 140.0}
+        ]
+    }));
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(set["result"]["change_count"], 2);
+
+    let inspected = invoke(json!({
+        "protocol_version": 1,
+        "operation": "inspect_project",
+        "path": path
+    }))
+    .1;
+    let tempo = inspected["result"]["project"]["tempo"].as_array().unwrap();
+    assert_eq!(tempo[0]["frame"], 0, "changes are stored in frame order");
+    assert_eq!(tempo[0]["beats_per_minute"], 140.0);
+
+    // A position converts to a frame and back to the same position.
+    let (code, from_bar) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "convert_time",
+        "path": path,
+        "position": {"bar": 5, "beat": 2, "tick": 240}
+    }));
+    assert_eq!(code, 0, "{from_bar}");
+    let frame = from_bar["result"]["frame"].clone();
+    let (code, round_trip) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "convert_time",
+        "path": path,
+        "frame": frame
+    }));
+    assert_eq!(code, 0, "{round_trip}");
+    assert_eq!(round_trip["result"]["formatted"], "5.2.240");
+
+    let (code, refused) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_tempo_map",
+        "path": path,
+        "changes": [{"frame": 0, "beats_per_minute": 0.0}]
+    }));
+    assert_eq!(code, 6, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_parameter");
+}
+
 /// Exports the project and returns the loudest absolute sample in the file.
 fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
     let (code, exported) = invoke(json!({

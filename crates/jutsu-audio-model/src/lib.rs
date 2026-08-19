@@ -4,6 +4,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod tempo;
+
+pub use tempo::{DEFAULT_BEATS_PER_MINUTE, MusicalPosition, TICKS_PER_BEAT, TempoChange, TempoMap};
+
 pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 1;
 
 macro_rules! entity_id {
@@ -74,6 +78,10 @@ pub struct Project {
     /// Parameter values that move over time. One lane per target parameter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub automation: Vec<AutomationLane>,
+    /// Tempo and time-signature changes, in frame order. Empty means 120 BPM
+    /// in 4/4, which is what `TempoMap` returns for a project that has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tempo: Vec<TempoChange>,
 }
 
 /// What a lane writes to. Named by entity ID, so a lane survives everything
@@ -198,6 +206,12 @@ impl LoopRegion {
 }
 
 impl Project {
+    /// The project's tempo, ready to convert with.
+    #[must_use]
+    pub fn tempo_map(&self) -> TempoMap {
+        TempoMap::new(&self.tempo)
+    }
+
     /// Follows a bus's output chain looking for the bus it started from.
     ///
     /// A cycle would make the mix unrenderable — every bus waiting on itself —

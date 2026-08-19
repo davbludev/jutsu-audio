@@ -101,3 +101,13 @@ them rather than making a caller do it.
 A value is held before the first point, interpolated to the next (`linear`) or held until it
 (`step`), and held after the last. A lane with no points is inert: the stored parameter value
 still stands. A lane whose target no longer exists is a validation error, not silence.
+
+## Tempo (additive)
+
+`tempo` is an optional list of changes, omitted when empty. Each is
+`{ frame, beats_per_minute, beats_per_bar, beat_unit }`. An absent or empty list means 120 BPM in
+4/4 — a project that never mentions tempo still has one, and never needs to write it down.
+
+Conversions live in `jutsu-audio-model::tempo`: frames to beats, beats to frames, frames to
+`bar.beat.tick` and back. Ticks are 960 per beat, which divides cleanly for triplets and
+sixteenths.

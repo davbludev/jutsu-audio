@@ -434,6 +434,9 @@ fn invert_command(
                 parameters: effect.parameters.clone(),
             }
         }
+        ProjectCommand::SetTempoMap { .. } => ProjectCommand::SetTempoMap {
+            changes: project.tempo.clone(),
+        },
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

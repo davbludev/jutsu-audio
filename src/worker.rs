@@ -236,21 +236,26 @@ fn mixdown(request: MixRequest, cache: &mut DecodeCache) -> JobResult {
         project_path,
     } = request;
 
-    let mixed = mix_project(&project, sample_rate, |asset_id| {
-        let asset = project
-            .assets
-            .iter()
-            .find(|asset| asset.id == asset_id)
-            .ok_or_else(|| format!("asset {asset_id} is missing from the project"))?;
-        let path = resolve_asset_path(&project_path, &asset.source)
-            .ok_or_else(|| format!("asset {} has no file to read", asset.name))?;
-        let (metadata, samples) = cache.get(&path)?;
-        Ok(SourceAudio {
-            sample_rate: metadata.sample_rate,
-            channels: metadata.channels,
-            samples,
-        })
-    });
+    let mixed = mix_project(
+        &project,
+        sample_rate,
+        jutsu_audio::extensions::registries(),
+        |asset_id| {
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| format!("asset {asset_id} is missing from the project"))?;
+            let path = resolve_asset_path(&project_path, &asset.source)
+                .ok_or_else(|| format!("asset {} has no file to read", asset.name))?;
+            let (metadata, samples) = cache.get(&path)?;
+            Ok(SourceAudio {
+                sample_rate: metadata.sample_rate,
+                channels: metadata.channels,
+                samples,
+            })
+        },
+    );
 
     match mixed {
         Ok(Some(snapshot)) => JobResult::Mixdown {
@@ -405,7 +410,9 @@ fn pick_export_destination() -> Option<PathBuf> {
 pub fn resolve_asset_path(project_path: &Path, source: &AudioAssetSource) -> Option<PathBuf> {
     let relative = match source {
         AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
-        AudioAssetSource::Generated { .. } => return None,
+        // Neither has a file to read: a generated asset is rendered, and a
+        // synth is played from the notes on its clips.
+        AudioAssetSource::Generated { .. } | AudioAssetSource::Synth { .. } => return None,
     };
     Some(
         project_path
@@ -454,6 +461,7 @@ mod tests {
             source_start_sample: 0,
             duration_samples: 4,
             parameters: std::collections::BTreeMap::new(),
+            notes: Vec::new(),
         };
         project.assets.push(asset);
         project.tracks[0].layers[0].clips.push(clip);

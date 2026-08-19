@@ -63,3 +63,20 @@ while `enabled: false` remembers where it was without playing it.
 and fails with `export_failed` when there is no active loop. The editor's own Export WAV does
 the same thing, and playback wraps on the same frame, so a loop sounds the same however it is
 rendered.
+
+## Synths
+
+`list_extensions` takes no project and answers with every registered synth, effect and generator:
+type ID, display name, state version, and each parameter's ID, value type, default and whether it
+can be automated. It is the discovery surface — nothing has to be scraped from prose.
+
+`add_synth_clip` creates the synth asset and the clip that plays it in one batch, so they undo
+together. It takes `type_id`, the lane, `start_sample`, `duration_samples`, optional `parameters`,
+and optional `notes` (`start_frame` and `duration_frames` are frames from the clip's own start).
+`set_synth_parameters` replaces an asset's parameters; `set_clip_notes` replaces everything a clip
+plays.
+
+Parameters are checked against the registry before anything is applied. Exit code `6` carries
+`unknown_extension` (with the types this build does have), `unknown_parameter` (with the ones the
+extension declares) or `invalid_parameter` (wrong type, or a value the extension refuses, such as
+a waveform name it does not know). Nothing is written when a request is refused.

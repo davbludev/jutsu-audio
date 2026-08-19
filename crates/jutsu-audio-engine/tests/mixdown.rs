@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use jutsu_audio_engine::{MixErrorCode, SourceAudio, mix_project};
+use jutsu_audio_extensions::{ExtensionRegistries, register_builtin};
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, BusId, CURRENT_PROJECT_SCHEMA_VERSION, Clip, ClipId, Layer,
     LayerId, MixerBus, ParameterValue, Project, ProjectId, ProjectMetadata, Track, TrackId,
@@ -89,6 +90,7 @@ fn clip(asset_id: AssetId, start: u64, duration: u64, parameters: &[(&str, f64)]
         start_sample: start,
         source_start_sample: 0,
         duration_samples: duration,
+        notes: Vec::new(),
         parameters: parameters
             .iter()
             .map(|(key, value)| ((*key).to_string(), ParameterValue::Float(*value)))
@@ -134,8 +136,14 @@ fn track_with(bus_id: &BusId, clip: Clip) -> Track {
 }
 
 /// Mixes with every clip reading the same source.
+fn extensions() -> ExtensionRegistries {
+    let mut registries = ExtensionRegistries::default();
+    register_builtin(&mut registries).expect("built-ins register");
+    registries
+}
+
 fn mix(project: &Project, source: SourceAudio) -> Vec<f32> {
-    mix_project(project, RATE, |_| Ok(source.clone()))
+    mix_project(project, RATE, &extensions(), |_| Ok(source.clone()))
         .expect("mix")
         .map(|snapshot| snapshot.samples().to_vec())
         .unwrap_or_default()
@@ -270,9 +278,12 @@ fn solo_wins_over_mute_and_silences_every_track_that_is_not_soloed() {
 fn a_timeline_with_nothing_audible_is_not_an_error() {
     let empty = builder();
     assert!(
-        mix_project(&empty.project, RATE, |_| Ok(mono(RATE, &[1.0])))
-            .expect("mix")
-            .is_none()
+        mix_project(&empty.project, RATE, &extensions(), |_| Ok(mono(
+            RATE,
+            &[1.0]
+        )))
+        .expect("mix")
+        .is_none()
     );
 
     let mut all_muted = builder();
@@ -280,9 +291,12 @@ fn a_timeline_with_nothing_audible_is_not_an_error() {
     let track = all_muted.track(asset, clip(asset, 0, 4, &[]));
     all_muted.flag(track, "mute");
     assert!(
-        mix_project(&all_muted.project, RATE, |_| Ok(mono(RATE, &[1.0])))
-            .expect("mix")
-            .is_none(),
+        mix_project(&all_muted.project, RATE, &extensions(), |_| Ok(mono(
+            RATE,
+            &[1.0]
+        )))
+        .expect("mix")
+        .is_none(),
         "muting everything leaves nothing to play, which is not a failure"
     );
 }
@@ -293,8 +307,10 @@ fn a_source_the_loader_cannot_provide_is_a_structured_failure() {
     let asset = builder.asset();
     builder.track(asset, clip(asset, 0, 4, &[]));
 
-    let error = mix_project(&builder.project, RATE, |_| Err("no such file".into()))
-        .expect_err("a missing source fails the mix");
+    let error = mix_project(&builder.project, RATE, &extensions(), |_| {
+        Err("no such file".into())
+    })
+    .expect_err("a missing source fails the mix");
     assert_eq!(error.code, MixErrorCode::SourceUnavailable);
     assert!(error.message.contains("no such file"), "{}", error.message);
 }

@@ -259,6 +259,20 @@ impl ExtensionRegistries {
             .map(|factory| factory.descriptor())
     }
 
+    /// Every registered synth type, in ID order. Discovery for a caller that
+    /// has no idea what this build ships with.
+    pub fn synth_type_ids(&self) -> impl Iterator<Item = &ExtensionTypeId> {
+        self.synths.keys()
+    }
+
+    pub fn effect_type_ids(&self) -> impl Iterator<Item = &ExtensionTypeId> {
+        self.effects.keys()
+    }
+
+    pub fn generator_type_ids(&self) -> impl Iterator<Item = &ExtensionTypeId> {
+        self.generators.keys()
+    }
+
     pub fn instantiate_synth(
         &self,
         type_id: &ExtensionTypeId,

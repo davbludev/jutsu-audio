@@ -80,6 +80,7 @@ impl Fixture {
             source_start_sample: 0,
             duration_samples: duration,
             parameters: BTreeMap::new(),
+            notes: Vec::new(),
         };
         let id = clip.id;
         self.project.tracks[0].layers[0].clips.push(clip);

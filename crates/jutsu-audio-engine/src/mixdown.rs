@@ -10,7 +10,8 @@
 
 use std::sync::Arc;
 
-use jutsu_audio_model::{AssetId, Clip, ParameterValue, Project, Track};
+use jutsu_audio_extensions::{ExtensionRegistries, ExtensionTypeId, NoteEvent};
+use jutsu_audio_model::{AssetId, AudioAssetSource, Clip, ParameterValue, Project, Track};
 
 use crate::{PlaybackSnapshot, SnapshotError};
 
@@ -43,6 +44,9 @@ pub struct SourceAudio {
 pub enum MixErrorCode {
     /// A clip names an asset the loader could not provide.
     SourceUnavailable,
+    /// A synth clip names an extension that is not registered, or parameters
+    /// the extension refuses.
+    SynthUnavailable,
     /// The timeline is longer than this machine can hold in memory.
     TooLong,
     /// The mixed buffer is not a valid playback snapshot.
@@ -72,12 +76,15 @@ impl From<SnapshotError> for MixError {
 
 /// Sums a project into one interleaved stereo snapshot at `sample_rate`.
 ///
-/// `load` is called once per clip and may cache; it returns the decoded source
-/// for an asset. `Ok(None)` means there is nothing audible — an empty timeline,
-/// or every audible track muted — which is not an error.
+/// `load` is called once per sample clip and may cache; it returns the decoded
+/// source for an asset. Synth clips do not go through it: they are rendered
+/// here from their notes, through `extensions`. `Ok(None)` means there is
+/// nothing audible — an empty timeline, or every audible track muted — which is
+/// not an error.
 pub fn mix_project(
     project: &Project,
     sample_rate: u32,
+    extensions: &ExtensionRegistries,
     mut load: impl FnMut(AssetId) -> Result<SourceAudio, String>,
 ) -> Result<Option<PlaybackSnapshot>, MixError> {
     let audible = audible_tracks(project);
@@ -108,18 +115,104 @@ pub fn mix_project(
 
     let mut mix = vec![0.0_f32; total_frames * usize::from(MIX_CHANNELS)];
     for clip in clips {
-        let source = load(clip.asset_id).map_err(|message| {
-            MixError::new(
-                MixErrorCode::SourceUnavailable,
-                format!("clip {} cannot be rendered: {message}", clip.id),
-            )
-        })?;
-        render_clip(&mut mix, total_frames, clip, &source, sample_rate);
+        match synth_source(project, clip) {
+            Some(synth) => {
+                let source = render_synth_clip(extensions, synth, clip, sample_rate)?;
+                // The rendered buffer *is* the clip, so it is read from its
+                // start rather than from the clip's source offset.
+                let mut placed = clip.clone();
+                placed.source_start_sample = 0;
+                render_clip(&mut mix, total_frames, &placed, &source, sample_rate);
+            }
+            None => {
+                let source = load(clip.asset_id).map_err(|message| {
+                    MixError::new(
+                        MixErrorCode::SourceUnavailable,
+                        format!("clip {} cannot be rendered: {message}", clip.id),
+                    )
+                })?;
+                render_clip(&mut mix, total_frames, clip, &source, sample_rate);
+            }
+        }
     }
 
     PlaybackSnapshot::new(sample_rate, MIX_CHANNELS, Arc::from(mix))
         .map(Some)
         .map_err(MixError::from)
+}
+
+/// The synth a clip plays, if it plays one.
+fn synth_source<'a>(project: &'a Project, clip: &Clip) -> Option<&'a AudioAssetSource> {
+    let asset = project
+        .assets
+        .iter()
+        .find(|asset| asset.id == clip.asset_id)?;
+    matches!(asset.source, AudioAssetSource::Synth { .. }).then_some(&asset.source)
+}
+
+/// Renders one synth clip's notes into a mono buffer as long as the clip.
+///
+/// Every clip gets a fresh instance, reset before it plays: a mix is the same
+/// however many times it is rendered, and in whatever order.
+fn render_synth_clip(
+    extensions: &ExtensionRegistries,
+    source: &AudioAssetSource,
+    clip: &Clip,
+    sample_rate: u32,
+) -> Result<SourceAudio, MixError> {
+    let AudioAssetSource::Synth {
+        type_id,
+        parameters,
+        ..
+    } = source
+    else {
+        unreachable!("only called for synth assets");
+    };
+    let type_id = ExtensionTypeId::new(type_id.clone()).map_err(|error| {
+        MixError::new(
+            MixErrorCode::SynthUnavailable,
+            format!(
+                "clip {} names an invalid synth type: {}",
+                clip.id, error.message
+            ),
+        )
+    })?;
+    let mut synth = extensions
+        .instantiate_synth(&type_id, parameters)
+        .map_err(|error| {
+            MixError::new(
+                MixErrorCode::SynthUnavailable,
+                format!("clip {} cannot be played: {}", clip.id, error.message),
+            )
+        })?;
+    synth.prepare(sample_rate);
+    synth.reset();
+
+    let frames = usize::try_from(clip.duration_samples).map_err(|_| {
+        MixError::new(
+            MixErrorCode::TooLong,
+            format!("clip {} is longer than this machine can render", clip.id),
+        )
+    })?;
+    let mut events = Vec::with_capacity(clip.notes.len() * 2);
+    for note in &clip.notes {
+        let start = usize::try_from(note.start_frame).unwrap_or(usize::MAX);
+        events.push(NoteEvent::note_on(start, note.pitch_hz, note.velocity));
+        events.push(NoteEvent::note_off(
+            start.saturating_add(usize::try_from(note.duration_frames).unwrap_or(usize::MAX)),
+            note.pitch_hz,
+        ));
+    }
+    // Rendering applies events in order, so they have to be in order.
+    events.sort_by_key(|event| event.frame_offset);
+
+    let mut samples = vec![0.0_f32; frames];
+    synth.render(&events, &mut samples);
+    Ok(SourceAudio {
+        sample_rate,
+        channels: 1,
+        samples: Arc::from(samples),
+    })
 }
 
 /// The tracks that should be heard: solo wins over mute, and with nothing

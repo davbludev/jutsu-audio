@@ -59,6 +59,7 @@ fn clip(asset_id: AssetId) -> Clip {
         start_sample: 10,
         source_start_sample: 0,
         duration_samples: 100,
+        notes: Vec::new(),
         parameters: [("gain_db".into(), ParameterValue::Float(-3.0))]
             .into_iter()
             .collect(),

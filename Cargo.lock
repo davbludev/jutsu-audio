@@ -1769,6 +1769,7 @@ dependencies = [
  "hound",
  "jutsu-audio-commands",
  "jutsu-audio-engine",
+ "jutsu-audio-extensions",
  "jutsu-audio-model",
  "jutsu-audio-project",
  "jutsu-audio-session",

@@ -435,6 +435,172 @@ fn markers_and_the_loop_region_survive_a_round_trip_and_bound_an_export() {
     assert_eq!(refused["error"]["code"], "export_failed");
 }
 
+#[test]
+fn extensions_are_discoverable_and_a_synth_clip_renders_into_an_export() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let output = directory.path().join("tone.wav");
+
+    let (code, listed) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "list_extensions"
+    }));
+    assert_eq!(code, 0, "{listed}");
+    let synths = listed["result"]["extensions"]["synths"].as_array().unwrap();
+    let oscillator = synths
+        .iter()
+        .find(|synth| synth["type_id"] == "builtin.oscillator")
+        .expect("the oscillator is discoverable");
+    assert_eq!(oscillator["kind"], "synth");
+    assert!(
+        oscillator["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|parameter| parameter["id"] == "waveform"),
+        "a caller can see the parameters without reading prose"
+    );
+
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Tones"
+    }))
+    .1;
+    let (code, added) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_synth_clip",
+        "path": path,
+        "track_id": created["result"]["track_id"],
+        "layer_id": created["result"]["layer_id"],
+        "type_id": "builtin.oscillator",
+        "start_sample": 0,
+        "duration_samples": 4_800,
+        "parameters": {"waveform": {"type": "text", "value": "square"}},
+        "notes": [{"start_frame": 0, "duration_frames": 2_400, "pitch_hz": 440.0}]
+    }));
+    assert_eq!(code, 0, "{added}");
+    let asset_id = added["result"]["asset_id"].clone();
+    let clip_id = added["result"]["clip_id"].clone();
+
+    let (code, exported) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "export_wav",
+        "path": path,
+        "output": output,
+        "encoding": "float32"
+    }));
+    assert_eq!(code, 0, "{exported}");
+    let mut reader = hound::WavReader::open(&output).unwrap();
+    let peak = reader
+        .samples::<f32>()
+        .map(|sample| sample.unwrap().abs())
+        .fold(0.0_f32, f32::max);
+    assert!(peak > 0.0, "the synth clip is audible in the export");
+
+    let (code, retuned) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_clip_notes",
+        "path": path,
+        "clip_id": clip_id,
+        "notes": [
+            {"start_frame": 0, "duration_frames": 1_200, "pitch_hz": 220.0, "velocity": 0.5},
+            {"start_frame": 1_200, "duration_frames": 1_200, "pitch_hz": 330.0}
+        ]
+    }));
+    assert_eq!(code, 0, "{retuned}");
+    assert_eq!(retuned["result"]["note_count"], 2);
+
+    let (code, adjusted) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_synth_parameters",
+        "path": path,
+        "asset_id": asset_id,
+        "parameters": {"waveform": {"type": "text", "value": "saw"}}
+    }));
+    assert_eq!(code, 0, "{adjusted}");
+}
+
+#[test]
+fn an_unknown_synth_or_parameter_answers_with_what_the_registry_knows() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Tones"
+    }))
+    .1;
+    let lane = json!({
+        "track_id": created["result"]["track_id"],
+        "layer_id": created["result"]["layer_id"]
+    });
+
+    let (code, unknown_type) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_synth_clip",
+        "path": path,
+        "track_id": lane["track_id"],
+        "layer_id": lane["layer_id"],
+        "type_id": "builtin.theremin",
+        "start_sample": 0,
+        "duration_samples": 480
+    }));
+    assert_eq!(code, 6, "{unknown_type}");
+    assert_eq!(unknown_type["error"]["code"], "unknown_extension");
+    assert!(
+        unknown_type["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("builtin.oscillator"),
+        "the error lists what this build does have: {unknown_type}"
+    );
+
+    let (code, unknown_parameter) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_synth_clip",
+        "path": path,
+        "track_id": lane["track_id"],
+        "layer_id": lane["layer_id"],
+        "type_id": "builtin.oscillator",
+        "start_sample": 0,
+        "duration_samples": 480,
+        "parameters": {"cutoff_hz": {"type": "float", "value": 800.0}}
+    }));
+    assert_eq!(code, 6, "{unknown_parameter}");
+    assert_eq!(unknown_parameter["error"]["code"], "unknown_parameter");
+    assert!(
+        unknown_parameter["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("waveform"),
+        "the error names the parameters it does take: {unknown_parameter}"
+    );
+
+    let (code, wrong_value) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_synth_clip",
+        "path": path,
+        "track_id": lane["track_id"],
+        "layer_id": lane["layer_id"],
+        "type_id": "builtin.oscillator",
+        "start_sample": 0,
+        "duration_samples": 480,
+        "parameters": {"waveform": {"type": "text", "value": "bagpipe"}}
+    }));
+    assert_eq!(code, 6, "{wrong_value}");
+    assert_eq!(wrong_value["error"]["code"], "invalid_parameter");
+    assert!(
+        wrong_value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("bagpipe"),
+        "{wrong_value}"
+    );
+}
+
 /// Exports the project and returns the loudest absolute sample in the file.
 fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
     let (code, exported) = invoke(json!({

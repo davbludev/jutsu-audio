@@ -6,11 +6,12 @@
 
 mod external_changes;
 mod recovery;
+mod synth_panel;
 mod theme;
 mod timeline;
 mod worker;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use jutsu_audio_commands::{
 use jutsu_audio_engine::{
     ExportRange, SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
 };
+use jutsu_audio_extensions::{ExtensionDescriptor, ExtensionTypeId};
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, Clip, ClipId, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
     Project, TrackId,
@@ -30,8 +32,10 @@ use jutsu_audio_model::{
 use jutsu_audio_project::{ImportStatus, ProjectStore, autosave};
 use jutsu_audio_session::TransportAction;
 
+use jutsu_audio::extensions;
 use jutsu_audio::session_host::{ExternalEffect, SessionHost};
 use recovery::{Decision, Recovery};
+use synth_panel::SynthAction;
 
 use timeline::{
     TimelineAction, TimelineContext, TimelineView, Tool, WaveformState, clip_gain_db,
@@ -480,6 +484,91 @@ impl JutsuAudioApp {
         self.transport.seek(target);
     }
 
+    /// The synth behind the selected clip, if it is a synth clip: its asset,
+    /// the extension descriptor, and the parameters stored on the asset.
+    fn selected_synth(
+        &self,
+    ) -> Option<(
+        AssetId,
+        &ExtensionDescriptor,
+        &BTreeMap<String, ParameterValue>,
+    )> {
+        let clip = self.selected_clip()?;
+        let asset = self
+            .project()
+            .assets
+            .iter()
+            .find(|asset| asset.id == clip.asset_id)?;
+        let AudioAssetSource::Synth {
+            type_id,
+            parameters,
+            ..
+        } = &asset.source
+        else {
+            return None;
+        };
+        let type_id = ExtensionTypeId::new(type_id.clone()).ok()?;
+        let descriptor = extensions::registries().synth_descriptor(&type_id)?;
+        Some((asset.id, descriptor, parameters))
+    }
+
+    /// Adds an oscillator clip at the playhead with one note in it, so it makes
+    /// a sound the moment it appears.
+    fn add_synth_clip(&mut self) {
+        let Some((track_id, layer_id)) = self
+            .selected_clip
+            .and_then(|clip_id| self.lane_of(clip_id))
+            .or_else(|| self.first_lane())
+        else {
+            self.status = Status::error("This project has no track to add a synth to");
+            return;
+        };
+        let type_id = jutsu_audio_extensions::builtin::oscillator_type_id();
+        let Some(descriptor) = extensions::registries().synth_descriptor(&type_id) else {
+            self.status = Status::error("No oscillator is registered in this build");
+            return;
+        };
+        let rate = self.sample_rate();
+        let asset = jutsu_audio_model::Asset {
+            id: AssetId::new(),
+            name: descriptor.display_name.clone(),
+            source: AudioAssetSource::Synth {
+                type_id: type_id.as_str().to_owned(),
+                state_version: descriptor.state_version,
+                parameters: BTreeMap::new(),
+            },
+        };
+        let asset_id = asset.id;
+        let clip = Clip {
+            id: ClipId::new(),
+            asset_id,
+            start_sample: self.transport.position_frames(),
+            source_start_sample: 0,
+            duration_samples: u64::from(rate),
+            parameters: BTreeMap::new(),
+            notes: vec![jutsu_audio_model::ClipNote {
+                start_frame: 0,
+                duration_frames: u64::from(rate) / 2,
+                pitch_hz: 440.0,
+                velocity: 1.0,
+            }],
+        };
+        let clip_id = clip.id;
+        // One batch: the synth and the clip that plays it undo together.
+        if self.apply(vec![
+            ProjectCommand::AddAsset { asset },
+            ProjectCommand::AddClip {
+                track_id,
+                layer_id,
+                clip,
+            },
+        ]) {
+            self.selected_asset = Some(asset_id);
+            self.select_clip(Some(clip_id));
+            self.status = Status::info("Synth clip added");
+        }
+    }
+
     fn selected_clip(&self) -> Option<&Clip> {
         let id = self.selected_clip?;
         self.project()
@@ -578,6 +667,7 @@ impl JutsuAudioApp {
             start_sample,
             source_start_sample: 0,
             duration_samples,
+            notes: Vec::new(),
             parameters: [("gain_db".to_owned(), ParameterValue::Float(0.0))]
                 .into_iter()
                 .collect(),
@@ -1655,6 +1745,7 @@ impl JutsuAudioApp {
                             AudioAssetSource::Generated { generator_type, .. } => {
                                 (0, generator_type.clone())
                             }
+                            AudioAssetSource::Synth { type_id, .. } => (0, type_id.clone()),
                         };
                         AssetRow {
                             id: asset.id,
@@ -1830,6 +1921,21 @@ impl JutsuAudioApp {
                     })
                     .inner;
 
+                // The synth section only exists for a clip that plays one, and
+                // is built from the extension's own descriptor.
+                let synth_action =
+                    self.selected_synth()
+                        .and_then(|(asset_id, descriptor, parameters)| {
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                                synth_panel::show(ui, descriptor, parameters, &clip.notes, rate)
+                            })
+                            .inner
+                            .map(|action| (asset_id, action))
+                        });
+                if let Some((asset_id, action)) = synth_action {
+                    self.apply_synth_action(asset_id, clip.id, action);
+                }
+
                 if outcome.changed {
                     self.edit = Some(outcome.edit);
                 }
@@ -1847,6 +1953,37 @@ impl JutsuAudioApp {
                     None => {}
                 }
             });
+    }
+
+    /// Folds a synth edit back into the project. Parameters are validated
+    /// against the registry first, so a bad value is reported rather than
+    /// stored and heard as silence later.
+    fn apply_synth_action(&mut self, asset_id: AssetId, clip_id: ClipId, action: SynthAction) {
+        match action {
+            SynthAction::SetParameters(parameters) => {
+                let type_id = self
+                    .selected_synth()
+                    .map(|(_, descriptor, _)| descriptor.type_id.clone());
+                if let Some(type_id) = type_id
+                    && let Err(error) =
+                        extensions::registries().instantiate_synth(&type_id, &parameters)
+                {
+                    self.status = Status::error(format!("Synth rejected that: {}", error.message));
+                    return;
+                }
+                if self.apply(vec![ProjectCommand::SetAssetParameters {
+                    asset_id,
+                    parameters,
+                }]) {
+                    self.status = Status::info("Synth updated");
+                }
+            }
+            SynthAction::SetNotes(notes) => {
+                if self.apply(vec![ProjectCommand::SetClipNotes { clip_id, notes }]) {
+                    self.status = Status::info("Notes updated");
+                }
+            }
+        }
     }
 
     fn inspector_header(&self, ui: &mut egui::Ui, clip: Option<&Clip>) {
@@ -2145,6 +2282,12 @@ impl JutsuAudioApp {
                         {
                             self.clear_loop();
                         }
+                        if theme::tool_button(ui, "+ Synth", false)
+                            .on_hover_text("Add an oscillator clip at the playhead")
+                            .clicked()
+                        {
+                            self.add_synth_clip();
+                        }
                         if theme::tool_button(ui, "+ Marker", false)
                             .on_hover_text("M — drop a marker at the playhead; , and . jump")
                             .clicked()
@@ -2421,6 +2564,7 @@ mod tests {
         Clip {
             id: ClipId::new(),
             asset_id: AssetId::new(),
+            notes: Vec::new(),
             start_sample: 100,
             source_start_sample: 5,
             duration_samples: 400,

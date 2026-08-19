@@ -68,6 +68,7 @@ fn updates_and_removes_clip_through_shared_commands() {
         source_start_sample: 0,
         duration_samples: 100,
         parameters: BTreeMap::new(),
+        notes: Vec::new(),
     };
     initial.assets.push(asset);
     initial.tracks[0].layers[0].clips.push(clip.clone());
@@ -207,6 +208,7 @@ fn validates_batch_final_state_and_commits_references_atomically() {
                         source_start_sample: 0,
                         duration_samples: 48_000,
                         parameters: BTreeMap::new(),
+                        notes: Vec::new(),
                     },
                 },
             ],
@@ -238,6 +240,7 @@ fn rejects_batch_that_leaves_invalid_project_references() {
         source_start_sample: 0,
         duration_samples: 1,
         parameters: BTreeMap::new(),
+        notes: Vec::new(),
     });
     let mut engine = ProjectCommandEngine::new(initial.clone()).unwrap();
 

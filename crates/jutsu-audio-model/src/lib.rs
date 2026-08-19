@@ -296,6 +296,16 @@ pub enum AudioAssetSource {
         algorithm_version: u32,
         seed: u64,
     },
+    /// A synthesizer rather than a file: the clips referencing it carry the
+    /// notes, and this carries what plays them.
+    Synth {
+        /// Registered extension type, e.g. `builtin.oscillator`.
+        type_id: String,
+        /// The descriptor version these parameters were written against.
+        state_version: u32,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -326,6 +336,20 @@ pub struct Clip {
     pub duration_samples: u64,
     #[serde(default)]
     pub parameters: BTreeMap<String, ParameterValue>,
+    /// What a synth clip plays. Empty for a sample clip, and omitted from the
+    /// file when empty, so nothing about existing projects changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<ClipNote>,
+}
+
+/// One note inside a clip. Times are frames from the clip's own start, so
+/// moving a clip moves its notes with it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ClipNote {
+    pub start_frame: u64,
+    pub duration_frames: u64,
+    pub pitch_hz: f64,
+    pub velocity: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

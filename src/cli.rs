@@ -8,8 +8,8 @@ use jutsu_audio_engine::{
     mix_project,
 };
 use jutsu_audio_model::{
-    AssetId, AudioAssetSource, Clip, ClipId, Layer, LayerId, LoopRegion, Marker, MarkerId,
-    ParameterValue, Project, Track, TrackId,
+    AssetId, AudioAssetSource, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker,
+    MarkerId, ParameterValue, Project, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli_session::{self, Applied};
+use crate::cli_synth;
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -181,6 +182,61 @@ enum Request {
         protocol_version: u32,
         path: PathBuf,
     },
+    /// Discovery: every registered synth, effect and generator with its
+    /// parameters. Takes no project, because it describes the build.
+    ListExtensions { protocol_version: u32 },
+    AddSynthClip {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        layer_id: LayerId,
+        type_id: String,
+        start_sample: u64,
+        duration_samples: u64,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+        #[serde(default)]
+        notes: Vec<CliNote>,
+    },
+    SetSynthParameters {
+        protocol_version: u32,
+        path: PathBuf,
+        asset_id: AssetId,
+        parameters: BTreeMap<String, ParameterValue>,
+    },
+    SetClipNotes {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        notes: Vec<CliNote>,
+    },
+}
+
+/// A note as a caller writes it: frames from the clip's own start.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliNote {
+    pub start_frame: u64,
+    pub duration_frames: u64,
+    pub pitch_hz: f64,
+    #[serde(default = "full_velocity")]
+    pub velocity: f32,
+}
+
+const fn full_velocity() -> f32 {
+    1.0
+}
+
+impl From<CliNote> for ClipNote {
+    fn from(note: CliNote) -> Self {
+        Self {
+            start_frame: note.start_frame,
+            duration_frames: note.duration_frames,
+            pitch_hz: note.pitch_hz,
+            velocity: note.velocity,
+        }
+    }
 }
 
 const fn enabled_by_default() -> bool {
@@ -281,7 +337,17 @@ impl Request {
             }
             | Self::ClearLoopRegion {
                 protocol_version, ..
+            }
+            | Self::AddSynthClip {
+                protocol_version, ..
+            }
+            | Self::SetSynthParameters {
+                protocol_version, ..
+            }
+            | Self::SetClipNotes {
+                protocol_version, ..
             } => *protocol_version,
+            Self::ListExtensions { protocol_version } => *protocol_version,
         }
     }
 }
@@ -372,6 +438,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 start_sample,
                 source_start_sample,
                 duration_samples,
+                notes: Vec::new(),
                 parameters: [("gain_db".into(), ParameterValue::Float(gain_db))]
                     .into_iter()
                     .collect(),
@@ -693,6 +760,115 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "loop_region_cleared", "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
+        Request::ListExtensions { .. } => Ok(json!({
+            "type": "extensions_listed",
+            "extensions": cli_synth::describe_all(crate::extensions::registries()),
+        })),
+        Request::AddSynthClip {
+            path,
+            track_id,
+            layer_id,
+            type_id,
+            start_sample,
+            duration_samples,
+            name,
+            parameters,
+            notes,
+            ..
+        } => {
+            let state_version =
+                cli_synth::validate_synth(crate::extensions::registries(), &type_id, &parameters)?;
+            let asset = jutsu_audio_model::Asset {
+                id: AssetId::new(),
+                name: name.unwrap_or_else(|| type_id.clone()),
+                source: AudioAssetSource::Synth {
+                    type_id,
+                    state_version,
+                    parameters,
+                },
+            };
+            let asset_id = asset.id;
+            let clip = Clip {
+                id: ClipId::new(),
+                asset_id,
+                start_sample,
+                source_start_sample: 0,
+                duration_samples,
+                parameters: BTreeMap::new(),
+                notes: notes.into_iter().map(ClipNote::from).collect(),
+            };
+            let clip_id = clip.id;
+            // One batch: the asset and the clip that needs it arrive together.
+            let applied = cli_session::apply(
+                &path,
+                vec![
+                    ProjectCommand::AddAsset { asset },
+                    ProjectCommand::AddClip {
+                        track_id,
+                        layer_id,
+                        clip,
+                    },
+                ],
+            )?;
+            Ok(
+                json!({"type": "synth_clip_added", "asset_id": asset_id, "clip_id": clip_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetSynthParameters {
+            path,
+            asset_id,
+            parameters,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| {
+                    (
+                        4,
+                        "command_failed",
+                        format!("asset {asset_id} does not exist"),
+                    )
+                })?;
+            let AudioAssetSource::Synth { type_id, .. } = &asset.source else {
+                return Err((
+                    4,
+                    "command_failed",
+                    format!("asset {asset_id} is not a synth"),
+                ));
+            };
+            cli_synth::validate_synth(crate::extensions::registries(), type_id, &parameters)?;
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetAssetParameters {
+                    asset_id,
+                    parameters,
+                }],
+            )?;
+            Ok(
+                json!({"type": "synth_parameters_set", "asset_id": asset_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetClipNotes {
+            path,
+            clip_id,
+            notes,
+            ..
+        } => {
+            let count = notes.len();
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetClipNotes {
+                    clip_id,
+                    notes: notes.into_iter().map(ClipNote::from).collect(),
+                }],
+            )?;
+            Ok(
+                json!({"type": "clip_notes_set", "clip_id": clip_id, "note_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -737,7 +913,7 @@ fn build_master_snapshot(
     for asset in &project.assets {
         let path = match &asset.source {
             AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
-            AudioAssetSource::Generated { .. } => continue,
+            AudioAssetSource::Generated { .. } | AudioAssetSource::Synth { .. } => continue,
         };
         let Ok((metadata, samples)) =
             AssetManager::decode_wav_samples(project_directory.join(path))
@@ -763,12 +939,17 @@ fn build_master_snapshot(
         .find_map(|asset| decoded.get(&asset.id))
         .map_or(48_000, |source| source.sample_rate);
 
-    let mixed = mix_project(project, sample_rate, |asset_id| {
-        decoded
-            .get(&asset_id)
-            .cloned()
-            .ok_or_else(|| format!("asset {asset_id} has no readable WAV source"))
-    })
+    let mixed = mix_project(
+        project,
+        sample_rate,
+        crate::extensions::registries(),
+        |asset_id| {
+            decoded
+                .get(&asset_id)
+                .cloned()
+                .ok_or_else(|| format!("asset {asset_id} has no readable WAV source"))
+        },
+    )
     .map_err(|error| (3, "export_failed", error.message))?;
 
     let snapshot = match mixed {

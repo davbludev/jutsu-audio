@@ -47,6 +47,7 @@ fn valid_project() -> Project {
                     start_sample: 48_000,
                     source_start_sample: 0,
                     duration_samples: 24_000,
+                    notes: Vec::new(),
                     parameters: BTreeMap::from([
                         ("gain_db".into(), ParameterValue::Float(-3.0)),
                         ("muted".into(), ParameterValue::Bool(false)),

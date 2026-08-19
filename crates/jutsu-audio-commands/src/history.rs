@@ -280,6 +280,29 @@ fn invert_command(
         ProjectCommand::SetLoopRegion { .. } => ProjectCommand::SetLoopRegion {
             region: project.loop_region,
         },
+        ProjectCommand::SetAssetParameters { asset_id, .. } => {
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| missing(format!("asset {asset_id} does not exist")))?;
+            let jutsu_audio_model::AudioAssetSource::Synth { parameters, .. } = &asset.source
+            else {
+                return Err(missing(format!("asset {asset_id} is not a synth")));
+            };
+            ProjectCommand::SetAssetParameters {
+                asset_id: *asset_id,
+                parameters: parameters.clone(),
+            }
+        }
+        ProjectCommand::SetClipNotes { clip_id, .. } => {
+            let (_, _, clip) = find_clip(project, *clip_id)
+                .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
+            ProjectCommand::SetClipNotes {
+                clip_id: *clip_id,
+                notes: clip.notes.clone(),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

@@ -1,8 +1,8 @@
 use std::fmt;
 
 use jutsu_audio_model::{
-    Asset, AssetId, Clip, ClipId, Layer, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
-    Project, Track, TrackId, ValidationDiagnostic,
+    Asset, AssetId, AudioAssetSource, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker,
+    MarkerId, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -126,6 +126,18 @@ pub enum ProjectCommand {
     /// `None` clears the loop entirely; a disabled region is remembered.
     SetLoopRegion {
         region: Option<LoopRegion>,
+    },
+    /// Replaces a synth asset's parameters. Whether the values make sense to
+    /// the extension is decided where the registry lives, before this is sent.
+    SetAssetParameters {
+        asset_id: AssetId,
+        parameters: std::collections::BTreeMap<String, ParameterValue>,
+    },
+    /// Replaces everything a synth clip plays. One command rather than
+    /// add/remove-note pairs, so an edit to a phrase is one undo step.
+    SetClipNotes {
+        clip_id: ClipId,
+        notes: Vec<ClipNote>,
     },
 }
 
@@ -610,6 +622,49 @@ pub(crate) fn apply_command(
                 },
                 entity_kind: EntityKind::LoopRegion,
                 entity_id: project.id.to_string(),
+            }
+        }
+        ProjectCommand::SetAssetParameters {
+            asset_id,
+            parameters,
+        } => {
+            let asset = project
+                .assets
+                .iter_mut()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("asset {asset_id} does not exist"),
+                    )
+                })?;
+            let AudioAssetSource::Synth {
+                parameters: stored, ..
+            } = &mut asset.source
+            else {
+                return Err(CommandError::at_command(
+                    CommandErrorCode::EntityNotFound,
+                    command_index,
+                    format!("asset {asset_id} is not a synth"),
+                ));
+            };
+            stored.clone_from(parameters);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Asset,
+                entity_id: asset_id.to_string(),
+            }
+        }
+        ProjectCommand::SetClipNotes { clip_id, notes } => {
+            let clip = find_clip_mut(project, *clip_id, command_index)?;
+            clip.notes.clone_from(notes);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

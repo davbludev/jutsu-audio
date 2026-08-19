@@ -102,6 +102,35 @@ fn mono(sample_rate: u32, samples: &[f32]) -> SourceAudio {
     }
 }
 
+/// A clip carrying explicit fade lengths, in project frames.
+fn clip_with_fades(asset_id: AssetId, duration: u64, fade_in: u64, fade_out: u64) -> Clip {
+    let mut clip = clip(asset_id, 0, duration, &[]);
+    clip.parameters.insert(
+        "fade_in_samples".into(),
+        ParameterValue::Integer(fade_in as i64),
+    );
+    clip.parameters.insert(
+        "fade_out_samples".into(),
+        ParameterValue::Integer(fade_out as i64),
+    );
+    clip
+}
+
+/// A one-clip track, for tests that build the project by hand.
+fn track_with(bus_id: &BusId, clip: Clip) -> Track {
+    Track {
+        id: TrackId::new(),
+        name: "Track".into(),
+        output_bus_id: *bus_id,
+        parameters: BTreeMap::new(),
+        layers: vec![Layer {
+            id: LayerId::new(),
+            name: "Layer".into(),
+            clips: vec![clip],
+        }],
+    }
+}
+
 /// Mixes with every clip reading the same source.
 fn mix(project: &Project, source: SourceAudio) -> Vec<f32> {
     mix_project(project, RATE, |_| Ok(source.clone()))
@@ -174,6 +203,38 @@ fn panning_moves_a_clip_across_the_stereo_field_without_dropping_the_centre() {
         centred,
         vec![1.0, 1.0],
         "no pan means unity in both channels"
+    );
+}
+
+#[test]
+fn fades_shape_the_clip_and_a_fade_longer_than_the_clip_is_capped() {
+    let mut faded = builder();
+    let asset = faded.asset();
+    faded.project.tracks.push(track_with(
+        &faded.bus_id.clone(),
+        clip_with_fades(asset, 4, 2, 0),
+    ));
+
+    let faded_mix = mix(&faded.project, mono(RATE, &[1.0, 1.0, 1.0, 1.0]));
+    let left: Vec<f32> = faded_mix.iter().step_by(2).copied().collect();
+    assert_eq!(
+        left,
+        vec![0.0, 0.5, 1.0, 1.0],
+        "linear fade in over 2 frames"
+    );
+
+    let mut capped = builder();
+    let asset = capped.asset();
+    capped.project.tracks.push(track_with(
+        &capped.bus_id.clone(),
+        clip_with_fades(asset, 2, 0, 40),
+    ));
+    let capped_mix = mix(&capped.project, mono(RATE, &[1.0, 1.0]));
+    let left: Vec<f32> = capped_mix.iter().step_by(2).copied().collect();
+    assert_eq!(
+        left,
+        vec![1.0, 0.5],
+        "a fade-out longer than the clip is capped at its length"
     );
 }
 

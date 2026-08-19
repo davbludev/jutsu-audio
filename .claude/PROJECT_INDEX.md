@@ -41,6 +41,9 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   may be depended on from here.
 - `crates/jutsu-audio-commands` — `ProjectCommandEngine::apply` clones the project, applies the
   batch, validates, and only then swaps it in. That clone is what gives rollback.
+- `crates/jutsu-audio-commands::edits` — timeline editing primitives (split, duplicate, ripple
+  delete, slip, fades, cross-fade, paste). Each returns one batch, which is one undo step. The
+  GUI and the CLI both build their edits here; neither assembles commands by hand.
 - `crates/jutsu-audio-project` — save/load/migrate, WAV import, and the waveform peak cache.
   The cache lives at `<project dir>/.jutsu-audio-cache/waveforms/<fingerprint>.json`; reach it
   through `AssetManager::waveform_cache_path` / `load_waveform` / `rebuild_waveform` rather than

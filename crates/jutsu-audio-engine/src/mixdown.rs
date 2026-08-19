@@ -26,6 +26,10 @@ pub const SOLO_KEY: &str = "solo";
 pub const GAIN_DB_KEY: &str = "gain_db";
 /// Clip parameter read as stereo position, `-1.0` hard left to `1.0` hard right.
 pub const PAN_KEY: &str = "pan";
+/// Clip parameter read as the fade-in length in project frames.
+pub const FADE_IN_KEY: &str = "fade_in_samples";
+/// Clip parameter read as the fade-out length in project frames.
+pub const FADE_OUT_KEY: &str = "fade_out_samples";
 
 /// One decoded source, interleaved, at whatever rate it was stored in.
 #[derive(Clone, Debug)]
@@ -157,6 +161,35 @@ pub fn clip_pan(clip: &Clip) -> f64 {
     }
 }
 
+/// Reads a fade length in project frames, capped at the clip so a fade can
+/// never run past the material it shapes.
+#[must_use]
+pub fn clip_fade(clip: &Clip, key: &str) -> u64 {
+    let frames = match clip.parameters.get(key) {
+        Some(ParameterValue::Integer(value)) => u64::try_from(*value).unwrap_or(0),
+        Some(ParameterValue::Float(value)) if *value >= 0.0 => *value as u64,
+        _ => 0,
+    };
+    frames.min(clip.duration_samples)
+}
+
+/// The fade envelope at `offset` frames into a clip: linear in, linear out,
+/// unity in between. Fades that overlap simply multiply, which tapers a very
+/// short clip rather than misbehaving.
+fn fade_envelope(offset: u64, duration: u64, fade_in: u64, fade_out: u64) -> f32 {
+    let mut gain = 1.0_f32;
+    if fade_in > 0 && offset < fade_in {
+        gain *= offset as f32 / fade_in as f32;
+    }
+    if fade_out > 0 {
+        let remaining = duration.saturating_sub(offset);
+        if remaining <= fade_out {
+            gain *= remaining as f32 / fade_out as f32;
+        }
+    }
+    gain
+}
+
 /// Square-root pan law, normalised so a centred clip is unity in both
 /// channels — the behaviour a project with no pan at all has always had.
 /// Hard panning therefore reaches +3 dB in the live channel rather than
@@ -183,6 +216,8 @@ fn render_clip(
     let gain = 10_f32.powf(clip_gain_db(clip) as f32 / 20.0);
     let (left, right) = pan_gains(clip_pan(clip));
     let channel_gain = [gain * left, gain * right];
+    let fade_in = clip_fade(clip, FADE_IN_KEY);
+    let fade_out = clip_fade(clip, FADE_OUT_KEY);
 
     for offset in 0..clip.duration_samples {
         let Ok(destination) = usize::try_from(clip.start_sample.saturating_add(offset)) else {
@@ -206,12 +241,13 @@ fn render_clip(
         let base = index * source_channels;
         let next_base = next * source_channels;
 
+        let envelope = fade_envelope(offset, clip.duration_samples, fade_in, fade_out);
         for channel in 0..usize::from(MIX_CHANNELS) {
             let source_channel = channel % source_channels;
             let current = source.samples[base + source_channel];
             let upcoming = source.samples[next_base + source_channel];
             mix[destination * usize::from(MIX_CHANNELS) + channel] +=
-                (current + (upcoming - current) * blend) * channel_gain[channel];
+                (current + (upcoming - current) * blend) * channel_gain[channel] * envelope;
         }
     }
 }

@@ -244,6 +244,15 @@ fn invert_command(
                 },
             }
         }
+        ProjectCommand::SetClipFades { clip_id, .. } => {
+            let (_, _, clip) = find_clip(project, *clip_id)
+                .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
+            ProjectCommand::SetClipFades {
+                clip_id: *clip_id,
+                fade_in_samples: crate::edits::fade_in(clip),
+                fade_out_samples: crate::edits::fade_out(clip),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

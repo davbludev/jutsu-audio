@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use jutsu_audio_commands::ProjectCommand;
+use jutsu_audio_commands::edits::{self, DeleteMode};
+use jutsu_audio_commands::{CommandError, ProjectCommand};
 use jutsu_audio_engine::{
     ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
     mix_project,
@@ -61,6 +62,9 @@ enum Request {
         protocol_version: u32,
         path: PathBuf,
         clip_id: ClipId,
+        /// Close the gap the clip leaves behind. Defaults to leaving it.
+        #[serde(default)]
+        ripple: bool,
     },
     ExportWav {
         protocol_version: u32,
@@ -112,6 +116,37 @@ enum Request {
         path: PathBuf,
         clip_id: ClipId,
         pan: f64,
+    },
+    SplitClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        at_frame: u64,
+    },
+    DuplicateClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        offset_frames: u64,
+    },
+    SlipClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        delta_frames: i64,
+    },
+    SetClipFades {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        fade_in_samples: u64,
+        fade_out_samples: u64,
+    },
+    CrossfadeClips {
+        protocol_version: u32,
+        path: PathBuf,
+        first_clip_id: ClipId,
+        second_clip_id: ClipId,
     },
 }
 
@@ -178,6 +213,21 @@ impl Request {
                 protocol_version, ..
             }
             | Self::SetClipPan {
+                protocol_version, ..
+            }
+            | Self::SplitClip {
+                protocol_version, ..
+            }
+            | Self::DuplicateClip {
+                protocol_version, ..
+            }
+            | Self::SlipClip {
+                protocol_version, ..
+            }
+            | Self::SetClipFades {
+                protocol_version, ..
+            }
+            | Self::CrossfadeClips {
                 protocol_version, ..
             } => *protocol_version,
         }
@@ -306,9 +356,23 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             )?;
             Ok(clip_result("clip_updated", clip_id, &applied))
         }
-        Request::DeleteClip { path, clip_id, .. } => {
-            let applied = cli_session::apply(&path, vec![ProjectCommand::RemoveClip { clip_id }])?;
-            Ok(clip_result("clip_deleted", clip_id, &applied))
+        Request::DeleteClip {
+            path,
+            clip_id,
+            ripple,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let mode = if ripple {
+                DeleteMode::Ripple
+            } else {
+                DeleteMode::Leave
+            };
+            let commands = edits::delete(&project, &[clip_id], mode).map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_deleted", "clip_id": clip_id, "ripple": ripple, "revision": applied.revision, "delivery": applied.delivery}),
+            )
         }
         Request::ExportWav {
             path,
@@ -428,6 +492,80 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "clip_pan_set", "clip_id": clip_id, "pan": pan, "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
+        Request::SplitClip {
+            path,
+            clip_id,
+            at_frame,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands = edits::split(&project, clip_id, at_frame).map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_split", "clip_id": clip_id, "at_frame": at_frame, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::DuplicateClip {
+            path,
+            clip_id,
+            offset_frames,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands =
+                edits::duplicate(&project, &[clip_id], offset_frames).map_err(command_failed)?;
+            let copy_id = match commands.first() {
+                Some(ProjectCommand::AddClip { clip, .. }) => clip.id,
+                _ => return Err((4, "command_failed", "duplicate produced no clip".into())),
+            };
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_duplicated", "clip_id": clip_id, "copy_id": copy_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SlipClip {
+            path,
+            clip_id,
+            delta_frames,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands =
+                edits::slip(&project, &[clip_id], delta_frames).map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_slipped", "clip_id": clip_id, "delta_frames": delta_frames, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetClipFades {
+            path,
+            clip_id,
+            fade_in_samples,
+            fade_out_samples,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands = edits::set_fades(&project, clip_id, fade_in_samples, fade_out_samples)
+                .map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_fades_set", "clip_id": clip_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::CrossfadeClips {
+            path,
+            first_clip_id,
+            second_clip_id,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands = edits::crossfade(&project, first_clip_id, second_clip_id)
+                .map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clips_crossfaded", "first_clip_id": first_clip_id, "second_clip_id": second_clip_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -517,4 +655,10 @@ fn build_master_snapshot(
 
 fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static str, String) {
     (3, "project_io_failed", error.message)
+}
+
+/// An edit that cannot be built — a clip that has gone, a split outside its
+/// clip — is a command failure, the same shape the engine reports.
+fn command_failed(error: CommandError) -> (i32, &'static str, String) {
+    (4, "command_failed", error.message)
 }

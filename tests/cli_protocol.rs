@@ -216,6 +216,120 @@ fn muting_a_track_silences_it_in_an_exported_wav() {
     );
 }
 
+#[test]
+fn split_fade_and_ripple_delete_are_reachable_from_the_machine_surface() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let source = directory.path().join("blip.wav");
+    write_test_wav(&source);
+
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }))
+    .1;
+    let imported = invoke(json!({
+        "protocol_version": 1,
+        "operation": "import_sample",
+        "path": path,
+        "source": source
+    }))
+    .1;
+    let lane = json!({
+        "track_id": created["result"]["track_id"],
+        "layer_id": created["result"]["layer_id"]
+    });
+    let added = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_clip",
+        "path": path,
+        "asset_id": imported["result"]["asset_id"],
+        "track_id": lane["track_id"],
+        "layer_id": lane["layer_id"],
+        "start_sample": 0,
+        "source_start_sample": 0,
+        "duration_samples": 480
+    }))
+    .1;
+    let clip_id = added["result"]["clip_id"].clone();
+
+    let (code, split) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "split_clip",
+        "path": path,
+        "clip_id": clip_id,
+        "at_frame": 240
+    }));
+    assert_eq!(code, 0, "{split}");
+    assert_eq!(split["result"]["type"], "clip_split");
+    assert_eq!(clips_in(&path).len(), 2, "a split makes two clips");
+
+    let (code, refused) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "split_clip",
+        "path": path,
+        "clip_id": clip_id,
+        "at_frame": 0
+    }));
+    assert_eq!(code, 4, "{refused}");
+    assert_eq!(refused["error"]["code"], "command_failed");
+
+    let (code, faded) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_clip_fades",
+        "path": path,
+        "clip_id": clip_id,
+        "fade_in_samples": 60,
+        "fade_out_samples": 9_000
+    }));
+    assert_eq!(code, 0, "{faded}");
+    let head = clips_in(&path)
+        .into_iter()
+        .find(|clip| clip["id"] == clip_id)
+        .unwrap();
+    assert_eq!(head["parameters"]["fade_in_samples"]["value"], 60);
+    assert_eq!(
+        head["parameters"]["fade_out_samples"]["value"], 180,
+        "a fade longer than the clip is trimmed to what is left of it"
+    );
+
+    let (code, deleted) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "delete_clip",
+        "path": path,
+        "clip_id": clip_id,
+        "ripple": true
+    }));
+    assert_eq!(code, 0, "{deleted}");
+    assert_eq!(deleted["result"]["ripple"], true);
+    let remaining = clips_in(&path);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0]["start_sample"], 0,
+        "the tail moved up into the gap the head left"
+    );
+}
+
+/// Every clip in the project, read back from disk.
+fn clips_in(path: &std::path::Path) -> Vec<Value> {
+    let inspected = invoke(json!({
+        "protocol_version": 1,
+        "operation": "inspect_project",
+        "path": path
+    }))
+    .1;
+    inspected["result"]["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|track| track["layers"].as_array().unwrap())
+        .flat_map(|layer| layer["clips"].as_array().unwrap())
+        .cloned()
+        .collect()
+}
+
 /// Exports the project and returns the loudest absolute sample in the file.
 fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
     let (code, exported) = invoke(json!({

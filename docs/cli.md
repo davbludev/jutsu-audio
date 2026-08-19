@@ -37,3 +37,17 @@ in both channels.
 These are the same rules playback uses. Every surface — GUI playback, GUI export, `export_wav` —
 mixes through `jutsu-audio-engine`'s `mix_project`, so a muted track is silent everywhere or
 nowhere.
+
+## Editing primitives
+
+`split_clip`, `duplicate_clip`, `slip_clip`, `set_clip_fades` and `crossfade_clips` build their
+command batches with `jutsu-audio-commands::edits`, the same code the editor's buttons use. One
+operation is one batch, so it is one revision and one undo step.
+
+`delete_clip` takes an optional `ripple` flag: with it, clips later in the same lane move earlier
+by the deleted clip's length; without it the gap stays. Fades are given in project frames and are
+trimmed to fit the clip — a fade longer than its clip comes back shorter than it was asked for,
+and the response's revision reflects what was stored.
+
+Refused edits — splitting outside a clip, cross-fading clips that do not overlap, naming a clip
+that is gone — exit `4` with `command_failed` and change nothing.

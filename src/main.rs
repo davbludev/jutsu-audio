@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use jutsu_audio_commands::edits::{self, DeleteMode};
 use jutsu_audio_commands::{
     COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandHistory, CommandId, EntityKind,
     ProjectCommand, ProjectCommandEngine,
@@ -121,6 +122,8 @@ struct ClipEdit {
     start: u64,
     duration: u64,
     source_start: u64,
+    fade_in: u64,
+    fade_out: u64,
     dirty: bool,
 }
 
@@ -132,6 +135,8 @@ impl ClipEdit {
             start: clip.start_sample,
             duration: clip.duration_samples,
             source_start: clip.source_start_sample,
+            fade_in: edits::fade_in(clip),
+            fade_out: edits::fade_out(clip),
             dirty: false,
         }
     }
@@ -143,6 +148,8 @@ struct JutsuAudioApp {
     project_path: Option<PathBuf>,
 
     selected_asset: Option<AssetId>,
+    /// Whole clips, so a paste carries gain, pan and fades with it.
+    clipboard: Vec<Clip>,
     selected_clip: Option<ClipId>,
     edit: Option<ClipEdit>,
     filter: String,
@@ -218,6 +225,7 @@ impl JutsuAudioApp {
             history: CommandHistory::new(),
             project_path,
             selected_asset: None,
+            clipboard: Vec::new(),
             selected_clip: None,
             edit: None,
             filter: String::new(),
@@ -417,14 +425,27 @@ impl JutsuAudioApp {
         let Some(mut edit) = self.edit else { return };
         edit.dirty = false;
         edit.duration = edit.duration.max(1);
+        // Fades are clamped here as well as in the engine, so the buffer the
+        // user is looking at shows what was actually stored.
+        let (fade_in, fade_out) = edits::clamp_fades(edit.duration, edit.fade_in, edit.fade_out);
+        edit.fade_in = fade_in;
+        edit.fade_out = fade_out;
         self.edit = Some(edit);
-        self.apply(vec![ProjectCommand::UpdateClip {
-            clip_id: edit.clip_id,
-            start_sample: edit.start,
-            source_start_sample: edit.source_start,
-            duration_samples: edit.duration,
-            gain_db: edit.gain_db,
-        }]);
+        // One batch: a length change and the fade it reshapes undo together.
+        self.apply(vec![
+            ProjectCommand::UpdateClip {
+                clip_id: edit.clip_id,
+                start_sample: edit.start,
+                source_start_sample: edit.source_start,
+                duration_samples: edit.duration,
+                gain_db: edit.gain_db,
+            },
+            ProjectCommand::SetClipFades {
+                clip_id: edit.clip_id,
+                fade_in_samples: fade_in,
+                fade_out_samples: fade_out,
+            },
+        ]);
     }
 
     fn add_asset_to_timeline(
@@ -500,45 +521,22 @@ impl JutsuAudioApp {
             return;
         };
         let playhead = self.transport.position_frames();
+        let end = clip.start_sample + clip.duration_samples;
         // Split at the playhead when it sits inside the clip, at the midpoint
         // otherwise, so the button always does something predictable.
-        let offset = if playhead > clip.start_sample
-            && playhead < clip.start_sample + clip.duration_samples
-        {
-            playhead - clip.start_sample
+        let at_frame = if playhead > clip.start_sample && playhead < end {
+            playhead
         } else {
-            clip.duration_samples / 2
+            clip.start_sample + clip.duration_samples / 2
         };
-        if offset == 0 || offset >= clip.duration_samples {
-            self.status = Status::error("This clip is too short to split");
-            return;
-        }
-        let Some((track_id, layer_id)) = self.lane_of(clip.id) else {
-            return;
-        };
-        let mut right = clip.clone();
-        right.id = ClipId::new();
-        right.start_sample += offset;
-        right.source_start_sample += offset;
-        right.duration_samples -= offset;
-
-        if self.apply(vec![
-            ProjectCommand::UpdateClip {
-                clip_id: clip.id,
-                start_sample: clip.start_sample,
-                source_start_sample: clip.source_start_sample,
-                duration_samples: offset,
-                // Keep the clip's own gain — not whatever the inspector shows.
-                gain_db: clip_gain_db(&clip),
-            },
-            ProjectCommand::AddClip {
-                track_id,
-                layer_id,
-                clip: right,
-            },
-        ]) {
-            self.edit = None;
-            self.status = Status::info("Clip split");
+        match edits::split(self.project(), clip.id, at_frame) {
+            Ok(commands) => {
+                if self.apply(commands) {
+                    self.edit = None;
+                    self.status = Status::info("Clip split");
+                }
+            }
+            Err(_) => self.status = Status::error("This clip is too short to split"),
         }
     }
 
@@ -546,30 +544,123 @@ impl JutsuAudioApp {
         let Some(clip) = self.selected_clip().cloned() else {
             return;
         };
-        let Some((track_id, layer_id)) = self.lane_of(clip.id) else {
+        let Ok(commands) = edits::duplicate(self.project(), &[clip.id], clip.duration_samples)
+        else {
             return;
         };
-        let mut copy = clip.clone();
-        copy.id = ClipId::new();
-        copy.start_sample = clip.start_sample + clip.duration_samples;
-        let new_id = copy.id;
-        if self.apply(vec![ProjectCommand::AddClip {
-            track_id,
-            layer_id,
-            clip: copy,
-        }]) {
-            self.select_clip(Some(new_id));
+        let copy = match commands.first() {
+            Some(ProjectCommand::AddClip { clip, .. }) => clip.id,
+            _ => return,
+        };
+        if self.apply(commands) {
+            self.select_clip(Some(copy));
             self.status = Status::info("Clip duplicated");
         }
     }
 
-    fn delete_selected(&mut self) {
+    /// Deletes the selection. `ripple` closes the gap behind it, pulling
+    /// everything later in the same lane earlier.
+    fn delete_selected(&mut self, ripple: bool) {
         let Some(clip_id) = self.selected_clip else {
             return;
         };
-        if self.apply(vec![ProjectCommand::RemoveClip { clip_id }]) {
+        let mode = if ripple {
+            DeleteMode::Ripple
+        } else {
+            DeleteMode::Leave
+        };
+        let Ok(commands) = edits::delete(self.project(), &[clip_id], mode) else {
+            return;
+        };
+        if self.apply(commands) {
             self.select_clip(None);
-            self.status = Status::info("Clip deleted");
+            self.status = Status::info(if ripple {
+                "Clip deleted, gap closed"
+            } else {
+                "Clip deleted"
+            });
+        }
+    }
+
+    /// Copies the selection. The clipboard holds whole clips, so a paste keeps
+    /// gain, pan and fades.
+    fn copy_selected(&mut self) {
+        let Some(clip) = self.selected_clip().cloned() else {
+            self.status = Status::info("Select a clip to copy");
+            return;
+        };
+        self.clipboard = vec![clip];
+        self.status = Status::info("Clip copied");
+    }
+
+    /// Pastes at the playhead, into the lane of the selection or the first lane
+    /// when nothing is selected.
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            self.status = Status::info("Nothing to paste");
+            return;
+        }
+        let Some((track_id, layer_id)) = self
+            .selected_clip
+            .and_then(|clip_id| self.lane_of(clip_id))
+            .or_else(|| self.first_lane())
+        else {
+            self.status = Status::error("This project has no track to paste into");
+            return;
+        };
+        let commands = edits::paste(
+            &self.clipboard,
+            track_id,
+            layer_id,
+            self.transport.position_frames(),
+        );
+        let pasted = match commands.first() {
+            Some(ProjectCommand::AddClip { clip, .. }) => Some(clip.id),
+            _ => None,
+        };
+        if self.apply(commands) {
+            self.select_clip(pasted);
+            self.status = Status::info("Pasted");
+        }
+    }
+
+    /// Cross-fades the selection with the clip it overlaps in the same lane.
+    fn crossfade_selected(&mut self) {
+        let Some(clip) = self.selected_clip().cloned() else {
+            return;
+        };
+        let Some((_, layer_id)) = self.lane_of(clip.id) else {
+            return;
+        };
+        let end = clip.start_sample + clip.duration_samples;
+        let neighbour = self
+            .project()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.layers)
+            .find(|layer| layer.id == layer_id)
+            .and_then(|layer| {
+                layer
+                    .clips
+                    .iter()
+                    .find(|other| {
+                        other.id != clip.id
+                            && other.start_sample < end
+                            && other.start_sample + other.duration_samples > clip.start_sample
+                    })
+                    .map(|other| other.id)
+            });
+        let Some(neighbour) = neighbour else {
+            self.status = Status::error("Overlap this clip with another to cross-fade");
+            return;
+        };
+        match edits::crossfade(self.project(), clip.id, neighbour) {
+            Ok(commands) => {
+                if self.apply(commands) {
+                    self.status = Status::info("Cross-faded");
+                }
+            }
+            Err(error) => self.status = Status::error(error.message),
         }
     }
 
@@ -1083,8 +1174,8 @@ impl JutsuAudioApp {
         if context.wants_keyboard_input() {
             return;
         }
-        let (space, delete, save, zoom_in, zoom_out, fit, stop, undo, redo) =
-            context.input(|input| {
+        let (space, delete, save, zoom_in, zoom_out, fit, stop, undo, redo, copy, pasted) = context
+            .input(|input| {
                 (
                     input.key_pressed(egui::Key::Space),
                     input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
@@ -1099,6 +1190,8 @@ impl JutsuAudioApp {
                     input.modifiers.command
                         && (input.key_pressed(egui::Key::Y)
                             || (input.modifiers.shift && input.key_pressed(egui::Key::Z))),
+                    input.modifiers.command && input.key_pressed(egui::Key::C),
+                    input.modifiers.command && input.key_pressed(egui::Key::V),
                 )
             });
         if undo {
@@ -1114,7 +1207,14 @@ impl JutsuAudioApp {
             self.transport.stop();
         }
         if delete {
-            self.delete_selected();
+            let ripple = context.input(|input| input.modifiers.shift);
+            self.delete_selected(ripple);
+        }
+        if copy {
+            self.copy_selected();
+        }
+        if pasted {
+            self.paste_clipboard();
         }
         if save {
             self.save_project();
@@ -1604,7 +1704,9 @@ impl JutsuAudioApp {
                 match outcome.action {
                     Some(ClipAction::Split) => self.split_selected(),
                     Some(ClipAction::Duplicate) => self.duplicate_selected(),
-                    Some(ClipAction::Delete) => self.delete_selected(),
+                    Some(ClipAction::Delete) => self.delete_selected(false),
+                    Some(ClipAction::RippleDelete) => self.delete_selected(true),
+                    Some(ClipAction::Crossfade) => self.crossfade_selected(),
                     None => {}
                 }
             });
@@ -1735,6 +1837,45 @@ impl JutsuAudioApp {
         }
 
         ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            theme::column_label(ui, "Fades");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new("linear")
+                        .font(theme::mono(9.0))
+                        .color(theme::FAINT),
+                );
+            });
+        });
+        ui.add_space(6.0);
+        for fade in FadeRow::ALL {
+            let value = match fade {
+                FadeRow::In => &mut edit.fade_in,
+                FadeRow::Out => &mut edit.fade_out,
+            };
+            let caption = format!("{}  {}", fade.label(), theme::format_time(*value, rate));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(caption).size(11.0).color(theme::DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let response = ui.add_sized(
+                        [86.0, 22.0],
+                        egui::DragValue::new(value)
+                            .speed(f64::from(rate) / 200.0)
+                            .range(0..=u64::from(u32::MAX)),
+                    );
+                    changed |= response.changed();
+                    released |= response.drag_stopped() || response.lost_focus();
+                });
+            });
+            ui.add_space(3.0);
+        }
+        ui.label(
+            RichText::new("Fades are trimmed to fit the clip")
+                .size(10.0)
+                .color(theme::FAINT),
+        );
+
+        ui.add_space(18.0);
         theme::column_label(ui, "Actions");
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -1755,12 +1896,29 @@ impl JutsuAudioApp {
             }
         });
         ui.add_space(6.0);
-        if theme::danger_button(ui, "Delete clip", ui.available_width())
-            .on_hover_text("Delete")
+        if ui
+            .add_sized([ui.available_width(), 26.0], flat("Cross-fade overlap"))
+            .on_hover_text("Fades this clip into the one it overlaps in the same lane")
             .clicked()
         {
-            action = Some(ClipAction::Delete);
+            action = Some(ClipAction::Crossfade);
         }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            if theme::danger_button(ui, "Delete", width)
+                .on_hover_text("Delete — leaves the gap")
+                .clicked()
+            {
+                action = Some(ClipAction::Delete);
+            }
+            if theme::danger_button(ui, "Ripple delete", width)
+                .on_hover_text("Shift+Delete — closes the gap in this lane")
+                .clicked()
+            {
+                action = Some(ClipAction::RippleDelete);
+            }
+        });
 
         ui.add_space(20.0);
         theme::column_label(ui, "Source");
@@ -2007,6 +2165,25 @@ enum ClipAction {
     Split,
     Duplicate,
     Delete,
+    RippleDelete,
+    Crossfade,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FadeRow {
+    In,
+    Out,
+}
+
+impl FadeRow {
+    const ALL: [Self; 2] = [Self::In, Self::Out];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::In => "Fade in",
+            Self::Out => "Fade out",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -7,6 +7,7 @@ use jutsu_audio_model::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod edits;
 mod history;
 
 pub use history::{CommandHistory, HISTORY_LIMIT, invert};
@@ -105,6 +106,12 @@ pub enum ProjectCommand {
     SetClipPan {
         clip_id: ClipId,
         pan: f64,
+    },
+    /// Fade lengths in project frames, measured from each end of the clip.
+    SetClipFades {
+        clip_id: ClipId,
+        fade_in_samples: u64,
+        fade_out_samples: u64,
     },
 }
 
@@ -494,21 +501,32 @@ pub(crate) fn apply_command(
             }
         }
         ProjectCommand::SetClipPan { clip_id, pan } => {
-            let clip = project
-                .tracks
-                .iter_mut()
-                .flat_map(|track| &mut track.layers)
-                .flat_map(|layer| &mut layer.clips)
-                .find(|clip| clip.id == *clip_id)
-                .ok_or_else(|| {
-                    CommandError::at_command(
-                        CommandErrorCode::EntityNotFound,
-                        command_index,
-                        format!("clip {clip_id} does not exist"),
-                    )
-                })?;
+            let clip = find_clip_mut(project, *clip_id, command_index)?;
             clip.parameters
                 .insert("pan".into(), ParameterValue::Float(pan.clamp(-1.0, 1.0)));
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
+            }
+        }
+        ProjectCommand::SetClipFades {
+            clip_id,
+            fade_in_samples,
+            fade_out_samples,
+        } => {
+            let clip = find_clip_mut(project, *clip_id, command_index)?;
+            let (fade_in, fade_out) =
+                edits::clamp_fades(clip.duration_samples, *fade_in_samples, *fade_out_samples);
+            clip.parameters.insert(
+                edits::FADE_IN_KEY.into(),
+                ParameterValue::Integer(i64::try_from(fade_in).unwrap_or(i64::MAX)),
+            );
+            clip.parameters.insert(
+                edits::FADE_OUT_KEY.into(),
+                ParameterValue::Integer(i64::try_from(fade_out).unwrap_or(i64::MAX)),
+            );
             ChangeEvent {
                 sequence: 0,
                 kind: ChangeKind::Updated,
@@ -562,6 +580,27 @@ fn find_track(
                 CommandErrorCode::EntityNotFound,
                 command_index,
                 format!("track {track_id} does not exist"),
+            )
+        })
+}
+
+/// The clip a command names, or a structured "does not exist".
+fn find_clip_mut(
+    project: &mut Project,
+    clip_id: ClipId,
+    command_index: usize,
+) -> Result<&mut Clip, CommandError> {
+    project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.layers)
+        .flat_map(|layer| &mut layer.clips)
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| {
+            CommandError::at_command(
+                CommandErrorCode::EntityNotFound,
+                command_index,
+                format!("clip {clip_id} does not exist"),
             )
         })
 }

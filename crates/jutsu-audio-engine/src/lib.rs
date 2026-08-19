@@ -9,7 +9,10 @@ use jutsu_audio_model::{AssetId, BusId, ClipId, LoopRegion, ParameterValue, Proj
 
 pub mod mixdown;
 
-pub use mixdown::{MIX_CHANNELS, MixError, MixErrorCode, SourceAudio, mix_project};
+pub use mixdown::{
+    MIX_CHANNELS, Meters, MixError, MixErrorCode, MixOutput, SourceAudio, mix_project,
+    mix_project_metered,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -244,11 +247,21 @@ pub struct PlaybackRenderer {
     fraction: f64,
     /// Last position this renderer wrote, so an external seek can be detected.
     last_position: u64,
+    /// The mix that was playing before the current one, and how many frames of
+    /// blending are left. Holding the `Arc` keeps the old audio alive for the
+    /// length of the fade and nothing longer.
+    crossfade: Option<(Arc<PlaybackSnapshot>, u32)>,
+    /// What the renderer last played, so a published mix can be noticed.
+    current: Option<Arc<PlaybackSnapshot>>,
 }
+
+/// How long a newly published mix takes to replace the old one. Short enough
+/// not to smear an edit, long enough to hide the step.
+const CROSSFADE_FRAMES: u32 = 240;
 
 impl PlaybackRenderer {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         snapshots: SnapshotReader,
         transport: TransportReader,
         output_sample_rate: u32,
@@ -261,6 +274,8 @@ impl PlaybackRenderer {
             output_channels,
             fraction: 0.0,
             last_position: 0,
+            crossfade: None,
+            current: None,
         }
     }
 
@@ -333,6 +348,16 @@ impl PlaybackRenderer {
             self.underrun();
             return;
         };
+        // A different mix than last block means someone edited while playing.
+        // Keep the old one for a few milliseconds to fade out from under it.
+        match &self.current {
+            Some(current) if Arc::ptr_eq(current, &snapshot) => {}
+            Some(current) => {
+                self.crossfade = Some((Arc::clone(current), CROSSFADE_FRAMES));
+                self.current = Some(Arc::clone(&snapshot));
+            }
+            None => self.current = Some(Arc::clone(&snapshot)),
+        }
         let source_channels = usize::from(snapshot.channel_count);
         let output_channels = usize::from(self.output_channels);
         if output_channels == 0 || !output.len().is_multiple_of(output_channels) {
@@ -342,8 +367,11 @@ impl PlaybackRenderer {
         let total_frames = snapshot.samples.len() / source_channels;
         let position = self.transport.0.position_frames.load(Ordering::Acquire);
         if position != self.last_position {
-            // Someone seeked or stopped between callbacks; drop the stale phase.
+            // Someone seeked or stopped between callbacks; drop the stale phase,
+            // and the fade with it — blending across a jump would mix two
+            // unrelated moments together.
             self.fraction = 0.0;
+            self.crossfade = None;
         }
         if position >= total_frames as u64 {
             self.finish();
@@ -366,6 +394,10 @@ impl PlaybackRenderer {
 
     /// Device format already matches the snapshot: copy verbatim, so real-time
     /// output stays bit-identical to what `OfflineExporter` writes.
+    ///
+    /// When a new mix has just been published, the first few milliseconds are
+    /// blended out of the old one. A gain or routing change during playback
+    /// would otherwise step the waveform mid-note, which is audible as a click.
     fn render_direct(
         &mut self,
         snapshot: &PlaybackSnapshot,
@@ -382,6 +414,7 @@ impl PlaybackRenderer {
         };
         let copied = output.len().min(source.len());
         output[..copied].copy_from_slice(&source[..copied]);
+        self.blend_previous(output, position, channels, copied);
         self.publish_peak(block_peak(&output[..copied]));
         let advanced = position + (copied / channels) as u64;
         self.transport
@@ -461,6 +494,62 @@ impl PlaybackRenderer {
         self.last_position = frame;
         if ended {
             self.finish();
+        }
+    }
+}
+
+impl PlaybackRenderer {
+    /// Fades the outgoing mix under the incoming one for [`CROSSFADE_FRAMES`].
+    ///
+    /// Only the verbatim path does this: it is the one that plays while the
+    /// user edits, and the one where a hard swap is most audible. A converted
+    /// path swaps outright.
+    ///
+    /// ponytail: a linear blend over a few milliseconds. Enough to hide a level
+    /// change; a longer, equal-power fade would be the next step if an edit to
+    /// a dense mix still ticks.
+    fn blend_previous(
+        &mut self,
+        output: &mut [f32],
+        position: u64,
+        channels: usize,
+        copied: usize,
+    ) {
+        let Some((previous, remaining)) = self.crossfade.as_mut() else {
+            return;
+        };
+        let Some(start) = usize::try_from(position)
+            .ok()
+            .and_then(|value| value.checked_mul(channels))
+        else {
+            self.crossfade = None;
+            return;
+        };
+        let Some(old) = previous.samples.get(start..) else {
+            self.crossfade = None;
+            return;
+        };
+
+        let frames = copied / channels.max(1);
+        let mut faded = 0;
+        for frame in 0..frames {
+            if *remaining == 0 {
+                break;
+            }
+            // 0.0 at the moment of the swap, 1.0 once the fade is done.
+            let blend = 1.0 - (*remaining as f32 / CROSSFADE_FRAMES as f32);
+            for channel in 0..channels {
+                let index = frame * channels + channel;
+                let Some(old_sample) = old.get(index) else {
+                    break;
+                };
+                output[index] = lerp(*old_sample, output[index], blend);
+            }
+            *remaining -= 1;
+            faded += 1;
+        }
+        if *remaining == 0 || faded == 0 {
+            self.crossfade = None;
         }
     }
 }

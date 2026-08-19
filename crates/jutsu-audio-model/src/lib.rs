@@ -104,6 +104,33 @@ impl LoopRegion {
 }
 
 impl Project {
+    /// Follows a bus's output chain looking for the bus it started from.
+    ///
+    /// A cycle would make the mix unrenderable — every bus waiting on itself —
+    /// so it is rejected at validation rather than discovered in the callback.
+    #[must_use]
+    pub fn bus_route_loops(&self, start: BusId) -> bool {
+        let mut visited = HashSet::new();
+        let mut current = start;
+        while let Some(next) = self
+            .buses
+            .iter()
+            .find(|bus| bus.id == current)
+            .and_then(|bus| bus.output_bus_id)
+        {
+            if next == start {
+                return true;
+            }
+            if !visited.insert(next) {
+                // A loop that does not include `start`: the bus this one feeds
+                // is itself in a cycle, which its own diagnostic reports.
+                return false;
+            }
+            current = next;
+        }
+        false
+    }
+
     #[must_use]
     pub fn validate(&self) -> Vec<ValidationDiagnostic> {
         let mut diagnostics = Vec::new();
@@ -176,6 +203,14 @@ impl Project {
                     format!("buses[{bus_index}].output_bus_id"),
                     Some(bus.id.to_string()),
                     format!("output bus {output_bus_id} does not exist"),
+                ));
+            }
+            if self.bus_route_loops(bus.id) {
+                diagnostics.push(ValidationDiagnostic::new(
+                    ValidationCode::BusCycle,
+                    format!("buses[{bus_index}].output_bus_id"),
+                    Some(bus.id.to_string()),
+                    "bus routing loops back on itself",
                 ));
             }
         }
@@ -383,6 +418,7 @@ pub enum ValidationCode {
     MissingBusReference,
     InvalidClipRange,
     InvalidLoopRegion,
+    BusCycle,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

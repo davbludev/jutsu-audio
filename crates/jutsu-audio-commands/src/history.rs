@@ -303,6 +303,65 @@ fn invert_command(
                 notes: clip.notes.clone(),
             }
         }
+        ProjectCommand::AddBus { bus } => ProjectCommand::RemoveBus { bus_id: bus.id },
+        ProjectCommand::RemoveBus { bus_id } => {
+            let bus = project
+                .buses
+                .iter()
+                .find(|bus| bus.id == *bus_id)
+                .ok_or_else(|| missing(format!("bus {bus_id} does not exist")))?;
+            ProjectCommand::AddBus { bus: bus.clone() }
+        }
+        ProjectCommand::SetBusOutput { bus_id, .. } => {
+            let bus = project
+                .buses
+                .iter()
+                .find(|bus| bus.id == *bus_id)
+                .ok_or_else(|| missing(format!("bus {bus_id} does not exist")))?;
+            ProjectCommand::SetBusOutput {
+                bus_id: *bus_id,
+                output_bus_id: bus.output_bus_id,
+            }
+        }
+        ProjectCommand::SetTrackOutput { track_id, .. } => {
+            let track = find_track(project, *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::SetTrackOutput {
+                track_id: *track_id,
+                output_bus_id: track.output_bus_id,
+            }
+        }
+        ProjectCommand::SetTrackParameter { track_id, key, .. } => {
+            let track = find_track(project, *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::SetTrackParameter {
+                track_id: *track_id,
+                key: key.clone(),
+                // A parameter that did not exist reads back as its absence
+                // would: unity gain, centre pan, off.
+                value: track
+                    .parameters
+                    .get(key)
+                    .cloned()
+                    .unwrap_or(ParameterValue::Float(0.0)),
+            }
+        }
+        ProjectCommand::SetBusParameter { bus_id, key, .. } => {
+            let bus = project
+                .buses
+                .iter()
+                .find(|bus| bus.id == *bus_id)
+                .ok_or_else(|| missing(format!("bus {bus_id} does not exist")))?;
+            ProjectCommand::SetBusParameter {
+                bus_id: *bus_id,
+                key: key.clone(),
+                value: bus
+                    .parameters
+                    .get(key)
+                    .cloned()
+                    .unwrap_or(ParameterValue::Float(0.0)),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

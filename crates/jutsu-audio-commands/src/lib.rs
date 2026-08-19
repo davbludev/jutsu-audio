@@ -1,8 +1,8 @@
 use std::fmt;
 
 use jutsu_audio_model::{
-    Asset, AssetId, AudioAssetSource, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker,
-    MarkerId, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
+    Asset, AssetId, AudioAssetSource, BusId, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion,
+    Marker, MarkerId, MixerBus, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -139,6 +139,36 @@ pub enum ProjectCommand {
         clip_id: ClipId,
         notes: Vec<ClipNote>,
     },
+    AddBus {
+        bus: MixerBus,
+    },
+    RemoveBus {
+        bus_id: BusId,
+    },
+    /// Where a bus sends its audio. `None` means nowhere, which is what the
+    /// master does. A route that would loop is rejected by validation.
+    SetBusOutput {
+        bus_id: BusId,
+        output_bus_id: Option<BusId>,
+    },
+    /// Which bus a track feeds.
+    SetTrackOutput {
+        track_id: TrackId,
+        output_bus_id: BusId,
+    },
+    /// One value on a track's strip — level, pan, or anything a later feature
+    /// adds. Named rather than typed because the meaning of a key belongs to
+    /// whatever reads it, not to the command engine.
+    SetTrackParameter {
+        track_id: TrackId,
+        key: String,
+        value: ParameterValue,
+    },
+    SetBusParameter {
+        bus_id: BusId,
+        key: String,
+        value: ParameterValue,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -159,6 +189,7 @@ pub enum EntityKind {
     Layer,
     Marker,
     LoopRegion,
+    Bus,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -667,6 +698,85 @@ pub(crate) fn apply_command(
                 entity_id: clip_id.to_string(),
             }
         }
+        ProjectCommand::AddBus { bus } => {
+            project.buses.push(bus.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Bus,
+                entity_id: bus.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveBus { bus_id } => {
+            let index = project
+                .buses
+                .iter()
+                .position(|bus| bus.id == *bus_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("bus {bus_id} does not exist"),
+                    )
+                })?;
+            project.buses.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Bus,
+                entity_id: bus_id.to_string(),
+            }
+        }
+        ProjectCommand::SetBusOutput {
+            bus_id,
+            output_bus_id,
+        } => {
+            let bus = find_bus(project, *bus_id, command_index)?;
+            bus.output_bus_id = *output_bus_id;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Bus,
+                entity_id: bus_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTrackOutput {
+            track_id,
+            output_bus_id,
+        } => {
+            let track = find_track(project, *track_id, command_index)?;
+            track.output_bus_id = *output_bus_id;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTrackParameter {
+            track_id,
+            key,
+            value,
+        } => {
+            let track = find_track(project, *track_id, command_index)?;
+            track.parameters.insert(key.clone(), value.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::SetBusParameter { bus_id, key, value } => {
+            let bus = find_bus(project, *bus_id, command_index)?;
+            bus.parameters.insert(key.clone(), value.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Bus,
+                entity_id: bus_id.to_string(),
+            }
+        }
         ProjectCommand::RemoveClip { clip_id } => {
             let clips = project
                 .tracks
@@ -734,6 +844,25 @@ fn find_clip_mut(
                 CommandErrorCode::EntityNotFound,
                 command_index,
                 format!("clip {clip_id} does not exist"),
+            )
+        })
+}
+
+/// The bus a command names, or a structured "does not exist".
+fn find_bus(
+    project: &mut Project,
+    bus_id: BusId,
+    command_index: usize,
+) -> Result<&mut MixerBus, CommandError> {
+    project
+        .buses
+        .iter_mut()
+        .find(|bus| bus.id == bus_id)
+        .ok_or_else(|| {
+            CommandError::at_command(
+                CommandErrorCode::EntityNotFound,
+                command_index,
+                format!("bus {bus_id} does not exist"),
             )
         })
 }

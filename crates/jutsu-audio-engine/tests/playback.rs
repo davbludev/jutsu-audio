@@ -215,3 +215,46 @@ fn a_disabled_or_empty_loop_plays_straight_through() {
     renderer.render(&mut output);
     assert_eq!(output, [0.1, 0.2, 0.3, 0.4]);
 }
+
+#[test]
+fn a_mix_published_during_playback_fades_in_rather_than_stepping() {
+    // Two mixes that differ by a large constant: a hard swap would step by the
+    // whole difference on one frame, which is exactly what clicks.
+    let exchange = SnapshotExchange::new(Some(mono_snapshot(&[0.5; 4_096])));
+    let transport = TransportController::new();
+    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader(), 48_000, 1);
+    transport.play();
+
+    let mut output = [0.0; 64];
+    renderer.render(&mut output);
+    assert!(output.iter().all(|sample| (*sample - 0.5).abs() < 1e-6));
+
+    exchange.publish(mono_snapshot(&[-0.5; 4_096]));
+    renderer.render(&mut output);
+
+    assert!(
+        (output[0] - 0.5).abs() < 0.05,
+        "the fade starts from the old mix, got {}",
+        output[0]
+    );
+    let steps = output
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        steps < 0.05,
+        "no frame-to-frame step larger than the fade allows, got {steps}"
+    );
+
+    // Well past the fade, the new mix is playing on its own.
+    let mut later = [0.0; 512];
+    renderer.render(&mut later);
+    assert!(
+        later
+            .iter()
+            .rev()
+            .take(64)
+            .all(|sample| (*sample + 0.5).abs() < 1e-6),
+        "the fade finishes on the new mix"
+    );
+}

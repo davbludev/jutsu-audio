@@ -2,15 +2,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use jutsu_audio_commands::edits::{self, DeleteMode};
-use jutsu_audio_commands::{CommandError, ProjectCommand};
+use jutsu_audio_commands::{CommandError, EffectTarget, ProjectCommand};
 use jutsu_audio_engine::{
     ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
     mix_project,
 };
 use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
-    AssetId, AudioAssetSource, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker,
-    MarkerId, ParameterValue, Project, Track, TrackId,
+    AssetId, AudioAssetSource, AutomationId, AutomationTarget, Breakpoint, BusId, Clip, ClipId,
+    ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
+    Project, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -18,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli_session::{self, Applied};
-use crate::{cli_generator, cli_synth};
+use crate::{cli_generator, cli_mixer, cli_synth};
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -230,6 +231,104 @@ enum Request {
         #[serde(default)]
         output: Option<PathBuf>,
     },
+    AddBus {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+        /// Where the new bus sends. Defaults to the master.
+        #[serde(default)]
+        output_bus_id: Option<BusId>,
+    },
+    SetTrackOutput {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        output_bus_id: BusId,
+    },
+    SetBusOutput {
+        protocol_version: u32,
+        path: PathBuf,
+        bus_id: BusId,
+        #[serde(default)]
+        output_bus_id: Option<BusId>,
+    },
+    SetTrackParameter {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        key: String,
+        value: ParameterValue,
+    },
+    SetBusParameter {
+        protocol_version: u32,
+        path: PathBuf,
+        bus_id: BusId,
+        key: String,
+        value: ParameterValue,
+    },
+    /// The parameters every track and bus strip has.
+    DescribeStrip { protocol_version: u32 },
+    DescribeEffect {
+        protocol_version: u32,
+        type_id: String,
+    },
+    AddEffect {
+        protocol_version: u32,
+        path: PathBuf,
+        #[serde(flatten)]
+        target: CliEffectTarget,
+        type_id: String,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+    },
+    RemoveEffect {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+    },
+    MoveEffect {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+        to_index: usize,
+    },
+    SetEffectEnabled {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+        enabled: bool,
+    },
+    SetEffectWet {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+        wet: f64,
+    },
+    SetEffectParameters {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+        parameters: BTreeMap<String, ParameterValue>,
+    },
+    AddAutomationLane {
+        protocol_version: u32,
+        path: PathBuf,
+        target: AutomationTarget,
+        parameter: String,
+        #[serde(default)]
+        points: Vec<CliBreakpoint>,
+    },
+    SetAutomationPoints {
+        protocol_version: u32,
+        path: PathBuf,
+        automation_id: AutomationId,
+        points: Vec<CliBreakpoint>,
+    },
+    RemoveAutomationLane {
+        protocol_version: u32,
+        path: PathBuf,
+        automation_id: AutomationId,
+    },
     /// Runs a recipe into a project: a generated asset and the clip that plays
     /// it, with IDs derived from the recipe.
     RunGenerator {
@@ -258,6 +357,42 @@ enum Request {
 
 const fn replace_by_default() -> RegenerateMode {
     RegenerateMode::Replace
+}
+
+/// Which chain an insert goes into, as a caller writes it.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliEffectTarget {
+    Track { track_id: TrackId },
+    Bus { bus_id: BusId },
+}
+
+impl From<CliEffectTarget> for EffectTarget {
+    fn from(target: CliEffectTarget) -> Self {
+        match target {
+            CliEffectTarget::Track { track_id } => Self::Track { track_id },
+            CliEffectTarget::Bus { bus_id } => Self::Bus { bus_id },
+        }
+    }
+}
+
+/// A breakpoint as a caller writes it.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliBreakpoint {
+    pub frame: u64,
+    pub value: f64,
+    #[serde(default)]
+    pub curve: Curve,
+}
+
+impl From<CliBreakpoint> for Breakpoint {
+    fn from(point: CliBreakpoint) -> Self {
+        Self {
+            frame: point.frame,
+            value: point.value,
+            curve: point.curve,
+        }
+    }
 }
 
 /// A note as a caller writes it: frames from the clip's own start.
@@ -404,7 +539,53 @@ impl Request {
             }
             | Self::RunGenerator {
                 protocol_version, ..
+            }
+            | Self::AddBus {
+                protocol_version, ..
+            }
+            | Self::SetTrackOutput {
+                protocol_version, ..
+            }
+            | Self::SetBusOutput {
+                protocol_version, ..
+            }
+            | Self::SetTrackParameter {
+                protocol_version, ..
+            }
+            | Self::SetBusParameter {
+                protocol_version, ..
+            }
+            | Self::DescribeEffect {
+                protocol_version, ..
+            }
+            | Self::AddEffect {
+                protocol_version, ..
+            }
+            | Self::RemoveEffect {
+                protocol_version, ..
+            }
+            | Self::MoveEffect {
+                protocol_version, ..
+            }
+            | Self::SetEffectEnabled {
+                protocol_version, ..
+            }
+            | Self::SetEffectWet {
+                protocol_version, ..
+            }
+            | Self::SetEffectParameters {
+                protocol_version, ..
+            }
+            | Self::AddAutomationLane {
+                protocol_version, ..
+            }
+            | Self::SetAutomationPoints {
+                protocol_version, ..
+            }
+            | Self::RemoveAutomationLane {
+                protocol_version, ..
             } => *protocol_version,
+            Self::DescribeStrip { protocol_version } => *protocol_version,
             Self::ListExtensions { protocol_version } => *protocol_version,
         }
     }
@@ -1038,6 +1219,299 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 "revision": applied.revision,
                 "delivery": applied.delivery,
             }))
+        }
+        Request::AddBus {
+            path,
+            name,
+            output_bus_id,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let bus = jutsu_audio_model::MixerBus {
+                id: BusId::new(),
+                name,
+                // Defaulting to the master is what a new bus almost always
+                // wants, and it keeps a project renderable straight away.
+                output_bus_id: Some(output_bus_id.unwrap_or(project.master_bus_id)),
+                parameters: BTreeMap::new(),
+                effects: Vec::new(),
+            };
+            let bus_id = bus.id;
+            let applied = cli_session::apply(&path, vec![ProjectCommand::AddBus { bus }])?;
+            Ok(
+                json!({"type": "bus_added", "bus_id": bus_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetTrackOutput {
+            path,
+            track_id,
+            output_bus_id,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetTrackOutput {
+                    track_id,
+                    output_bus_id,
+                }],
+            )?;
+            Ok(
+                json!({"type": "track_output_set", "track_id": track_id, "output_bus_id": output_bus_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetBusOutput {
+            path,
+            bus_id,
+            output_bus_id,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetBusOutput {
+                    bus_id,
+                    output_bus_id,
+                }],
+            )?;
+            Ok(
+                json!({"type": "bus_output_set", "bus_id": bus_id, "output_bus_id": output_bus_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetTrackParameter {
+            path,
+            track_id,
+            key,
+            value,
+            ..
+        } => {
+            cli_mixer::validate_strip(&key, &value)?;
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetTrackParameter {
+                    track_id,
+                    key: key.clone(),
+                    value: value.clone(),
+                }],
+            )?;
+            Ok(
+                json!({"type": "track_parameter_set", "track_id": track_id, "key": key, "value": value, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetBusParameter {
+            path,
+            bus_id,
+            key,
+            value,
+            ..
+        } => {
+            cli_mixer::validate_strip(&key, &value)?;
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetBusParameter {
+                    bus_id,
+                    key: key.clone(),
+                    value: value.clone(),
+                }],
+            )?;
+            Ok(
+                json!({"type": "bus_parameter_set", "bus_id": bus_id, "key": key, "value": value, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::DescribeStrip { .. } => Ok(json!({
+            "type": "strip_described",
+            "strip": cli_mixer::describe_strip(),
+        })),
+        Request::DescribeEffect { type_id, .. } => {
+            let registries = crate::extensions::registries();
+            let parsed = ExtensionTypeId::new(type_id.clone())
+                .map_err(|error| (6, "invalid_parameter", error.message))?;
+            let described = cli_mixer::describe_effect(registries, &parsed).ok_or_else(|| {
+                let available: Vec<&str> = registries
+                    .effect_type_ids()
+                    .map(ExtensionTypeId::as_str)
+                    .collect();
+                (
+                    6,
+                    "unknown_extension",
+                    format!(
+                        "no effect '{type_id}' is registered; this build has {}",
+                        available.join(", ")
+                    ),
+                )
+            })?;
+            Ok(json!({"type": "effect_described", "effect": described}))
+        }
+        Request::AddEffect {
+            path,
+            target,
+            type_id,
+            parameters,
+            ..
+        } => {
+            let state_version =
+                cli_mixer::validate_effect(crate::extensions::registries(), &type_id, &parameters)?;
+            let effect = jutsu_audio_model::EffectInsert {
+                id: EffectId::new(),
+                type_id,
+                state_version,
+                parameters,
+                enabled: true,
+                wet: 1.0,
+            };
+            let effect_id = effect.id;
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::AddEffect {
+                    target: target.into(),
+                    effect,
+                }],
+            )?;
+            Ok(
+                json!({"type": "effect_added", "effect_id": effect_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::RemoveEffect {
+            path, effect_id, ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::RemoveEffect { effect_id }])?;
+            Ok(
+                json!({"type": "effect_removed", "effect_id": effect_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::MoveEffect {
+            path,
+            effect_id,
+            to_index,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::MoveEffect {
+                    effect_id,
+                    to_index,
+                }],
+            )?;
+            Ok(
+                json!({"type": "effect_moved", "effect_id": effect_id, "to_index": to_index, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetEffectEnabled {
+            path,
+            effect_id,
+            enabled,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetEffectEnabled { effect_id, enabled }],
+            )?;
+            Ok(
+                json!({"type": "effect_enabled_set", "effect_id": effect_id, "enabled": enabled, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetEffectWet {
+            path,
+            effect_id,
+            wet,
+            ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::SetEffectWet { effect_id, wet }])?;
+            Ok(
+                json!({"type": "effect_wet_set", "effect_id": effect_id, "wet": wet, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetEffectParameters {
+            path,
+            effect_id,
+            parameters,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let insert = project
+                .tracks
+                .iter()
+                .flat_map(|track| &track.effects)
+                .chain(project.buses.iter().flat_map(|bus| &bus.effects))
+                .find(|effect| effect.id == effect_id)
+                .ok_or_else(|| {
+                    (
+                        4,
+                        "command_failed",
+                        format!("effect {effect_id} does not exist"),
+                    )
+                })?;
+            cli_mixer::validate_effect(
+                crate::extensions::registries(),
+                &insert.type_id,
+                &parameters,
+            )?;
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetEffectParameters {
+                    effect_id,
+                    parameters,
+                }],
+            )?;
+            Ok(
+                json!({"type": "effect_parameters_set", "effect_id": effect_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::AddAutomationLane {
+            path,
+            target,
+            parameter,
+            points,
+            ..
+        } => {
+            // Only the name is checked here: a lane's values are bounded by the
+            // same descriptor when they are rendered, and a caller drawing a
+            // curve should not be stopped mid-draw by one out-of-range point.
+            cli_mixer::validate_strip(&parameter, &ParameterValue::Float(0.0))?;
+            let mut lane = jutsu_audio_model::AutomationLane {
+                id: AutomationId::new(),
+                target,
+                parameter: parameter.clone(),
+                points: points.into_iter().map(Breakpoint::from).collect(),
+            };
+            lane.points.sort_by_key(|point| point.frame);
+            let automation_id = lane.id;
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::AddAutomationLane { lane }])?;
+            Ok(
+                json!({"type": "automation_lane_added", "automation_id": automation_id, "parameter": parameter, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetAutomationPoints {
+            path,
+            automation_id,
+            points,
+            ..
+        } => {
+            let count = points.len();
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetAutomationPoints {
+                    automation_id,
+                    points: points.into_iter().map(Breakpoint::from).collect(),
+                }],
+            )?;
+            Ok(
+                json!({"type": "automation_points_set", "automation_id": automation_id, "point_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::RemoveAutomationLane {
+            path,
+            automation_id,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::RemoveAutomationLane { automation_id }],
+            )?;
+            Ok(
+                json!({"type": "automation_lane_removed", "automation_id": automation_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
         }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;

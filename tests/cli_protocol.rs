@@ -601,6 +601,178 @@ fn an_unknown_synth_or_parameter_answers_with_what_the_registry_knows() {
     );
 }
 
+#[test]
+fn the_mixer_routing_effects_and_automation_are_all_reachable_from_the_cli() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Mixing"
+    }))
+    .1;
+    let track_id = created["result"]["track_id"].clone();
+
+    // The strip's own schema, discoverable like an extension's.
+    let (code, strip) = invoke(json!({"protocol_version": 1, "operation": "describe_strip"}));
+    assert_eq!(code, 0, "{strip}");
+    let parameters = strip["result"]["strip"]["parameters"].as_array().unwrap();
+    assert!(
+        parameters
+            .iter()
+            .any(|parameter| parameter["id"] == "gain_db" && parameter["unit"] == "dB"),
+        "a level is decibels, and says so: {strip}"
+    );
+
+    let (code, bus) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_bus",
+        "path": path,
+        "name": "Reverb bus"
+    }));
+    assert_eq!(code, 0, "{bus}");
+    let bus_id = bus["result"]["bus_id"].clone();
+
+    let (code, routed) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_track_output",
+        "path": path,
+        "track_id": track_id,
+        "output_bus_id": bus_id
+    }));
+    assert_eq!(code, 0, "{routed}");
+
+    let (code, level) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_bus_parameter",
+        "path": path,
+        "bus_id": bus_id,
+        "key": "gain_db",
+        "value": {"type": "float", "value": -6.0}
+    }));
+    assert_eq!(code, 0, "{level}");
+
+    let (code, refused) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_bus_parameter",
+        "path": path,
+        "bus_id": bus_id,
+        "key": "gain_db",
+        "value": {"type": "float", "value": 400.0}
+    }));
+    assert_eq!(code, 6, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_parameter");
+
+    let (code, described) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "describe_effect",
+        "type_id": "builtin.reverb"
+    }));
+    assert_eq!(code, 0, "{described}");
+    assert!(
+        !described["result"]["effect"]["presets"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "an effect publishes its presets: {described}"
+    );
+
+    let (code, added) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_effect",
+        "path": path,
+        "bus": {"bus_id": bus_id},
+        "type_id": "builtin.reverb",
+        "parameters": {"size": {"type": "float", "value": 0.7}}
+    }));
+    assert_eq!(code, 0, "{added}");
+    let effect_id = added["result"]["effect_id"].clone();
+
+    let (code, bypassed) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_effect_enabled",
+        "path": path,
+        "effect_id": effect_id,
+        "enabled": false
+    }));
+    assert_eq!(code, 0, "{bypassed}");
+
+    let (code, lane) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_automation_lane",
+        "path": path,
+        "target": {"type": "track", "track_id": track_id},
+        "parameter": "gain_db",
+        "points": [
+            {"frame": 4_800, "value": 0.0},
+            {"frame": 0, "value": -24.0}
+        ]
+    }));
+    assert_eq!(code, 0, "{lane}");
+    let automation_id = lane["result"]["automation_id"].clone();
+
+    let inspected = invoke(json!({
+        "protocol_version": 1,
+        "operation": "inspect_project",
+        "path": path
+    }))
+    .1;
+    let project = &inspected["result"]["project"];
+    assert_eq!(project["buses"].as_array().unwrap().len(), 2);
+    assert_eq!(project["tracks"][0]["output_bus_id"], bus_id);
+    let lanes = project["automation"].as_array().unwrap();
+    assert_eq!(
+        lanes[0]["points"][0]["frame"], 0,
+        "points are stored in order"
+    );
+    let bus = project["buses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bus| bus["id"] == bus_id)
+        .unwrap();
+    assert_eq!(bus["effects"][0]["enabled"], false);
+
+    let (code, cleared) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "remove_automation_lane",
+        "path": path,
+        "automation_id": automation_id
+    }));
+    assert_eq!(code, 0, "{cleared}");
+}
+
+#[test]
+fn an_effect_this_build_does_not_have_is_refused_with_what_it_does_have() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Mixing"
+    }))
+    .1;
+
+    let (code, unknown) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_effect",
+        "path": path,
+        "track": {"track_id": created["result"]["track_id"]},
+        "type_id": "builtin.phaser"
+    }));
+    assert_eq!(code, 6, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "unknown_extension");
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("builtin.reverb"),
+        "{unknown}"
+    );
+}
+
 /// Exports the project and returns the loudest absolute sample in the file.
 fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
     let (code, exported) = invoke(json!({

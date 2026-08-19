@@ -13,7 +13,8 @@ use std::thread;
 
 use eframe::egui;
 use jutsu_audio_engine::{
-    ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot, SourceAudio, mix_project,
+    ExportEncoding, ExportRange, Meters, OfflineExporter, PlaybackSnapshot, SourceAudio,
+    mix_project_metered,
 };
 use jutsu_audio_model::{AssetId, AudioAssetSource, Project};
 use jutsu_audio_project::{
@@ -95,6 +96,10 @@ pub enum JobResult {
     Mixdown {
         id: u64,
         result: Result<Arc<PlaybackSnapshot>, String>,
+        /// What each track and bus contributed, for the mixer's meters.
+        meters: Box<Meters>,
+        /// What the mix could not do as asked — a missing effect, say.
+        diagnostics: Vec<String>,
     },
     /// An empty timeline: nothing to play, and that is not an error.
     MixdownEmpty {
@@ -236,7 +241,7 @@ fn mixdown(request: MixRequest, cache: &mut DecodeCache) -> JobResult {
         project_path,
     } = request;
 
-    let mixed = mix_project(
+    let mixed = mix_project_metered(
         &project,
         sample_rate,
         jutsu_audio::extensions::registries(),
@@ -258,14 +263,27 @@ fn mixdown(request: MixRequest, cache: &mut DecodeCache) -> JobResult {
     );
 
     match mixed {
-        Ok(Some(snapshot)) => JobResult::Mixdown {
-            id,
-            result: Ok(Arc::new(snapshot)),
-        },
-        Ok(None) => JobResult::MixdownEmpty { id },
+        Ok(output) => {
+            let diagnostics = output
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect();
+            match output.snapshot {
+                Some(snapshot) => JobResult::Mixdown {
+                    id,
+                    result: Ok(Arc::new(snapshot)),
+                    meters: Box::new(output.meters),
+                    diagnostics,
+                },
+                None => JobResult::MixdownEmpty { id },
+            }
+        }
         Err(error) => JobResult::Mixdown {
             id,
             result: Err(error.message),
+            meters: Box::default(),
+            diagnostics: Vec::new(),
         },
     }
 }

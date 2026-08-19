@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod cli_generator;
+pub mod cli_mixer;
 pub mod cli_session;
 pub mod cli_synth;
 pub mod extensions;

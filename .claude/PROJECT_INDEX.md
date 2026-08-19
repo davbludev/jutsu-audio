@@ -27,6 +27,9 @@ it has moved.
   answers external requests. Lives in `src/lib.rs` (not the binary) so
   `tests/session_workflows.rs` can stand up a real editor against a real socket.
 - `src/extensions.rs` — the one set of registries both surfaces share, built once on first use.
+- `src/mixer_panel.rs` — the mixer strips, meters, routing and effect racks. Reports actions;
+  `main.rs::apply_mixer_action` is what turns them into commands.
+- `src/cli_mixer.rs` — the same surface for the CLI, validating through `parameters`.
 - `src/cli_generator.rs` — generator discovery, recipe validation, preview rendering and the
   derived-ID rules `run_generator` uses.
 - `src/cli_synth.rs` — registry-backed validation and discovery for the CLI; `src/synth_panel.rs`

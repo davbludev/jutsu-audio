@@ -103,3 +103,21 @@ Entity IDs are derived from the recipe, so:
 Generated audio is never stored in the project. The mix renders it from the asset's provenance —
 generator, algorithm version, seed, parameters — which is why two exports of one project are
 identical, and why a project can never disagree with its own recipe.
+
+## Mixer, effects and automation
+
+`describe_strip` answers with the parameters every track and bus has — `gain_db`, `pan`, `mute`,
+`solo` — with their units, ranges and defaults. They are validated exactly as an extension's
+parameters are, so the CLI and the editor accept and refuse the same values.
+
+Routing: `add_bus`, `set_track_output`, `set_bus_output`. Levels: `set_track_parameter`,
+`set_bus_parameter`.
+
+Effects: `describe_effect` gives one effect's schema and presets; `add_effect` (with either
+`{"track": {"track_id": …}}` or `{"bus": {"bus_id": …}}`), `remove_effect`, `move_effect`,
+`set_effect_enabled`, `set_effect_wet` and `set_effect_parameters` manage a chain. Order is what a
+chain is, so `move_effect` is an ordinary edit.
+
+Automation: `add_automation_lane` takes a target, a parameter and optional breakpoints;
+`set_automation_points` replaces a lane's curve in one command, and `remove_automation_lane`
+deletes it. Points are stored in frame order whatever order they arrive in.

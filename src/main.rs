@@ -5,6 +5,7 @@
 //! mutation goes through the command engine — never directly.
 
 mod external_changes;
+mod mixer_panel;
 mod recovery;
 mod synth_panel;
 mod theme;
@@ -22,7 +23,7 @@ use jutsu_audio_commands::{
     ProjectCommand, ProjectCommandEngine,
 };
 use jutsu_audio_engine::{
-    ExportRange, SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
+    ExportRange, Meters, SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
 };
 use jutsu_audio_extensions::{ExtensionDescriptor, ExtensionTypeId};
 use jutsu_audio_model::{
@@ -34,6 +35,7 @@ use jutsu_audio_session::TransportAction;
 
 use jutsu_audio::extensions;
 use jutsu_audio::session_host::{ExternalEffect, SessionHost};
+use mixer_panel::{EffectSlot, MixerAction};
 use recovery::{Decision, Recovery};
 use synth_panel::SynthAction;
 
@@ -177,6 +179,12 @@ struct JutsuAudioApp {
     exporting: bool,
 
     waveforms: HashMap<AssetId, WaveformState>,
+    /// What each track and bus contributed to the last mix. Static levels for
+    /// the mixer, next to the transport's live peak.
+    meters: Meters,
+    /// Whether the mixer panel is open. Off by default: the timeline is what a
+    /// sample editor spends its time in.
+    show_mixer: bool,
     timeline: TimelineView,
     status: Status,
     /// Live while this window owns a project on disk. `None` for an unsaved
@@ -251,6 +259,8 @@ impl JutsuAudioApp {
             dialog_open: false,
             exporting: false,
             waveforms: HashMap::new(),
+            meters: Meters::default(),
+            show_mixer: false,
             timeline: TimelineView::default(),
             status,
             session: None,
@@ -1032,14 +1042,25 @@ impl JutsuAudioApp {
     fn drain_results(&mut self) {
         while let Some(result) = self.worker.try_recv() {
             match result {
-                JobResult::Mixdown { id, result } => {
+                JobResult::Mixdown {
+                    id,
+                    result,
+                    meters,
+                    diagnostics,
+                } => {
                     if self.active_mix != Some(id) {
                         continue; // A newer mix is already on its way.
                     }
                     self.active_mix = None;
+                    self.meters = *meters;
                     match result {
                         Ok(snapshot) => {
                             self.snapshots.publish(snapshot);
+                            // A missing effect or a refused parameter set does
+                            // not stop the mix; it is worth saying once.
+                            if let Some(first) = diagnostics.first() {
+                                self.status = Status::error(first.clone());
+                            }
                             // Only clear a "working" message. An edit that just
                             // reported "Clip added" should keep saying so.
                             if self.status.tone == Tone::Working {
@@ -1314,6 +1335,7 @@ impl eframe::App for JutsuAudioApp {
 
         self.top_bar(context);
         self.status_bar(context);
+        self.mixer_panel(context);
         self.library_panel(context);
         self.inspector_panel(context);
         self.timeline_panel(context);
@@ -1540,6 +1562,12 @@ impl JutsuAudioApp {
                         if theme::flat_button(ui, "Open").clicked() {
                             self.open_project();
                         }
+                        if theme::tool_button(ui, "Mixer", self.show_mixer)
+                            .on_hover_text("Channel strips, routing and effects")
+                            .clicked()
+                        {
+                            self.show_mixer = !self.show_mixer;
+                        }
                         let redo = ui.add_enabled_ui(self.history.can_redo(), |ui| {
                             theme::flat_button(ui, "Redo").on_hover_text("Ctrl+Shift+Z")
                         });
@@ -1672,6 +1700,114 @@ impl JutsuAudioApp {
     }
 
     // ─── library ────────────────────────────────────────────────────────────
+
+    /// The mixer, when it is open. Drawn between the status bar and the rest so
+    /// it never covers the timeline it describes.
+    fn mixer_panel(&mut self, context: &egui::Context) {
+        if !self.show_mixer {
+            return;
+        }
+        let mut actions = Vec::new();
+        egui::TopBottomPanel::bottom("mixer")
+            .frame(
+                theme::panel(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(0, 8))
+                    .stroke(Stroke::new(1.0_f32, theme::RULE)),
+            )
+            .exact_height(268.0)
+            .show(context, |ui| {
+                actions =
+                    mixer_panel::show(ui, self.project(), &self.meters, extensions::registries());
+            });
+        for action in actions {
+            self.apply_mixer_action(action);
+        }
+    }
+
+    /// Turns a mixer control into a command. Every visible mutation goes this
+    /// way, so a fader move undoes and syncs like any other edit.
+    fn apply_mixer_action(&mut self, action: MixerAction) {
+        let command = match action {
+            MixerAction::SetTrackParameter {
+                track_id,
+                key,
+                value,
+            } => ProjectCommand::SetTrackParameter {
+                track_id,
+                key,
+                value,
+            },
+            MixerAction::SetBusParameter { bus_id, key, value } => {
+                ProjectCommand::SetBusParameter { bus_id, key, value }
+            }
+            MixerAction::SetTrackOutput {
+                track_id,
+                output_bus_id,
+            } => ProjectCommand::SetTrackOutput {
+                track_id,
+                output_bus_id,
+            },
+            MixerAction::SetBusOutput {
+                bus_id,
+                output_bus_id,
+            } => ProjectCommand::SetBusOutput {
+                bus_id,
+                output_bus_id,
+            },
+            MixerAction::AddBus => {
+                let bus = jutsu_audio_model::MixerBus {
+                    id: jutsu_audio_model::BusId::new(),
+                    name: format!("Bus {}", self.project().buses.len()),
+                    output_bus_id: Some(self.project().master_bus_id),
+                    parameters: BTreeMap::new(),
+                    effects: Vec::new(),
+                };
+                ProjectCommand::AddBus { bus }
+            }
+            MixerAction::AddEffect { target, type_id } => {
+                let Some(effect) = self.new_effect(&type_id) else {
+                    return;
+                };
+                ProjectCommand::AddEffect {
+                    target: match target {
+                        EffectSlot::Track(track_id) => {
+                            jutsu_audio_commands::EffectTarget::Track { track_id }
+                        }
+                        EffectSlot::Bus(bus_id) => {
+                            jutsu_audio_commands::EffectTarget::Bus { bus_id }
+                        }
+                    },
+                    effect,
+                }
+            }
+            MixerAction::RemoveEffect { effect_id } => ProjectCommand::RemoveEffect { effect_id },
+            MixerAction::ToggleEffect { effect_id, enabled } => {
+                ProjectCommand::SetEffectEnabled { effect_id, enabled }
+            }
+            MixerAction::MoveEffect {
+                effect_id,
+                to_index,
+            } => ProjectCommand::MoveEffect {
+                effect_id,
+                to_index,
+            },
+        };
+        self.apply(vec![command]);
+    }
+
+    /// An insert of a registered effect, at its defaults.
+    fn new_effect(&mut self, type_id: &str) -> Option<jutsu_audio_model::EffectInsert> {
+        let parsed = ExtensionTypeId::new(type_id).ok()?;
+        let descriptor = extensions::registries().effect_descriptor(&parsed)?;
+        Some(jutsu_audio_model::EffectInsert {
+            id: jutsu_audio_model::EffectId::new(),
+            type_id: type_id.to_owned(),
+            state_version: descriptor.state_version,
+            parameters: BTreeMap::new(),
+            enabled: true,
+            wet: 1.0,
+        })
+    }
 
     fn library_panel(&mut self, context: &egui::Context) {
         egui::SidePanel::left("library")

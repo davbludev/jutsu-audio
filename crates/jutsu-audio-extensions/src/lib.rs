@@ -5,6 +5,12 @@ use std::sync::Arc;
 use jutsu_audio_model::ParameterValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
+pub mod builtin;
+pub mod voice;
+
+pub use builtin::register_builtin;
+pub use voice::{Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ExtensionTypeId(String);
@@ -144,8 +150,18 @@ impl ExtensionError {
     }
 }
 
+/// A polyphonic sound source.
+///
+/// `prepare` is called before the first render and whenever the rate changes;
+/// `reset` returns the instance to the state a fresh one would be in, so a
+/// transport stop or an offline render starts from silence and produces the
+/// same samples every time. `render` fills the block and applies each event on
+/// the frame it names. Neither method may allocate or block: they run on the
+/// audio callback.
 pub trait Synth: Send {
-    fn render_mono(&mut self, output: &mut [f32]);
+    fn prepare(&mut self, sample_rate: u32);
+    fn reset(&mut self);
+    fn render(&mut self, events: &[NoteEvent], output: &mut [f32]);
 }
 
 pub trait Effect: Send {

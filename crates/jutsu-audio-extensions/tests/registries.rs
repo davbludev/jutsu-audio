@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use jutsu_audio_extensions::{
     Effect, EffectFactory, ExtensionDescriptor, ExtensionError, ExtensionErrorCode, ExtensionKind,
-    ExtensionRegistries, ExtensionTypeId, Generator, GeneratorFactory, ParameterDescriptor,
-    ParameterType, Synth, SynthFactory,
+    ExtensionRegistries, ExtensionTypeId, Generator, GeneratorFactory, NoteEvent,
+    ParameterDescriptor, ParameterType, Synth, SynthFactory,
 };
 use jutsu_audio_model::ParameterValue;
 
@@ -29,7 +29,11 @@ struct MockSynthFactory(ExtensionDescriptor);
 struct MockSynth(f32);
 
 impl Synth for MockSynth {
-    fn render_mono(&mut self, output: &mut [f32]) {
+    fn prepare(&mut self, _sample_rate: u32) {}
+
+    fn reset(&mut self) {}
+
+    fn render(&mut self, _events: &[NoteEvent], output: &mut [f32]) {
         output.fill(self.0);
     }
 }
@@ -142,7 +146,7 @@ fn typed_registries_register_describe_and_instantiate_all_extension_kinds() {
         )
         .unwrap();
     let mut synth_output = [0.0; 2];
-    synth.render_mono(&mut synth_output);
+    synth.render(&[], &mut synth_output);
     assert_eq!(synth_output, [0.25, 0.25]);
 
     let mut effect = registries

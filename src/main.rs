@@ -6,7 +6,6 @@
 
 mod external_changes;
 mod recovery;
-mod session_host;
 mod theme;
 mod timeline;
 mod worker;
@@ -29,8 +28,8 @@ use jutsu_audio_model::{
 use jutsu_audio_project::{ImportStatus, ProjectStore, autosave};
 use jutsu_audio_session::TransportAction;
 
+use jutsu_audio::session_host::{ExternalEffect, SessionHost};
 use recovery::{Decision, Recovery};
-use session_host::{ExternalEffect, SessionHost};
 
 use timeline::{
     TimelineAction, TimelineContext, TimelineView, Tool, WaveformState, clip_gain_db,
@@ -544,7 +543,8 @@ impl JutsuAudioApp {
         }
         self.session = None;
         let Some(path) = wanted else { return };
-        match SessionHost::start(path, context) {
+        let context = context.clone();
+        match SessionHost::start(path, move || context.request_repaint()) {
             Ok(host) => self.session = Some(host),
             Err(message) => {
                 // The editor still works; only the machine surface is missing.

@@ -23,6 +23,9 @@ it has moved.
   `main.rs::sync_session` whenever `project_path` changes.
 - `src/theme.rs` — Console palette, egui style, and shared drawing helpers (peak meter, time
   formatting, elision). Change colours here, nowhere else.
+- `src/session_host.rs` — the editor's side of the session protocol, and the only place the GUI
+  answers external requests. Lives in `src/lib.rs` (not the binary) so
+  `tests/session_workflows.rs` can stand up a real editor against a real socket.
 - `src/cli.rs` + `src/bin/jutsu-audio-cli.rs` — the machine surface. Reached through
   `src/lib.rs`, which exists only to expose `cli` to the binary and to `tests/cli_protocol.rs`.
   Request variants are tagged with `"operation"`, not `"type"`.

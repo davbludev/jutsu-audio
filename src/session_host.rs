@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui;
 use jutsu_audio_commands::{
     COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandError, CommandErrorCode,
     CommandHistory, CommandId, ProjectCommandEngine,
@@ -37,12 +36,16 @@ pub struct SessionHost {
 }
 
 impl SessionHost {
-    /// Starts hosting `project_path`.
+    /// Starts hosting `project_path`. `wake` is called whenever a request
+    /// arrives, so an owner that only runs on repaint can be nudged.
     ///
     /// Refuses when another editor already answers for that project: taking it
     /// over would leave two writers, which is exactly what the protocol exists
     /// to prevent.
-    pub fn start(project_path: &Path, context: &egui::Context) -> Result<Self, String> {
+    pub fn start(
+        project_path: &Path,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, String> {
         match SessionClient::attach(project_path) {
             Ok(Some(_)) => {
                 return Err("another Jutsu Audio window already owns this project".into());
@@ -50,8 +53,7 @@ impl SessionHost {
             Ok(None) => {}
             Err(error) => return Err(error.message),
         }
-        let context = context.clone();
-        let server = SessionServer::start(project_path, move || context.request_repaint())
+        let server = SessionServer::start(project_path, wake)
             .map_err(|error| format!("could not host this project: {error}"))?;
         Ok(Self {
             server,
@@ -195,7 +197,7 @@ mod tests {
         ProjectStore::save(&path, &project).expect("save");
         let mut engine = ProjectCommandEngine::new(project).expect("engine");
         let mut history = CommandHistory::new();
-        let host = SessionHost::start(&path, &egui::Context::default()).expect("host");
+        let host = SessionHost::start(&path, || {}).expect("host");
 
         let client_path = path.clone();
         let client = std::thread::spawn(move || {
@@ -372,9 +374,8 @@ mod tests {
         let path = directory.path().join("song.jutsu-audio.json");
         ProjectStore::save(&path, &ProjectStore::new_project("Owned")).expect("save");
 
-        let context = egui::Context::default();
-        let _first = SessionHost::start(&path, &context).expect("first host");
-        let Err(second) = SessionHost::start(&path, &context) else {
+        let _first = SessionHost::start(&path, || {}).expect("first host");
+        let Err(second) = SessionHost::start(&path, || {}) else {
             panic!("a second editor must not take over a hosted project");
         };
         assert!(second.contains("already owns"), "got {second}");

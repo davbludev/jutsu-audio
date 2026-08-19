@@ -4,6 +4,7 @@
 //! and file dialog happens on the worker (see [`worker`]), and every project
 //! mutation goes through the command engine — never directly.
 
+mod external_changes;
 mod session_host;
 mod theme;
 mod timeline;
@@ -15,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use jutsu_audio_commands::{
-    COMMAND_PROTOCOL_VERSION, CommandEnvelope, CommandId, ProjectCommand, ProjectCommandEngine,
+    COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandId, EntityKind, ProjectCommand,
+    ProjectCommandEngine,
 };
 use jutsu_audio_engine::{
     SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
@@ -38,6 +40,9 @@ use worker::{Job, JobResult, MixClip, MixRequest, Worker, resolve_asset_path};
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
 /// How long editing has to settle before the timeline is re-mixed for playback.
 const MIX_DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long an edit that arrived over the session socket waits before the
+/// timeline is re-mixed. Short: nobody is still typing on the other end.
+const EXTERNAL_LATENCY: Duration = Duration::from_millis(50);
 /// Meter fall-off per frame. Fast enough to follow, slow enough to read.
 const METER_DECAY: f32 = 0.90;
 
@@ -498,10 +503,15 @@ impl JutsuAudioApp {
         let effects = host.poll(commands, self.unsaved);
         for effect in effects {
             match effect {
-                ExternalEffect::Applied { revision, .. } => {
+                ExternalEffect::Applied { revision, changes } => {
+                    self.absorb_external(&changes);
                     self.unsaved = true;
-                    self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
-                    self.mix_due = Some(Instant::now() + MIX_DEBOUNCE);
+                    // `get_or_insert`, not a fresh deadline: a burst of external
+                    // edits must not keep pushing the audio rebuild out of
+                    // reach. The first edit of a burst fixes when it lands.
+                    let now = Instant::now();
+                    self.save_due.get_or_insert(now + SAVE_DEBOUNCE);
+                    self.mix_due.get_or_insert(now + EXTERNAL_LATENCY);
                     self.status = Status::info(format!("External edit applied (r{revision})"));
                 }
                 ExternalEffect::Transport {
@@ -514,6 +524,27 @@ impl JutsuAudioApp {
                     TransportAction::Seek => self.transport.seek(position_frames),
                 },
             }
+        }
+    }
+
+    /// Follows an external edit into the state the project does not own.
+    /// Selection is keyed by entity ID, so an update keeps it and only a
+    /// removal drops it.
+    fn absorb_external(&mut self, changes: &[ChangeEvent]) {
+        if self.selected_clip.is_some_and(|clip| {
+            external_changes::removes(changes, EntityKind::Clip, &clip.to_string())
+        }) {
+            self.select_clip(None);
+        }
+        if self.selected_asset.is_some_and(|asset| {
+            external_changes::removes(changes, EntityKind::Asset, &asset.to_string())
+        }) {
+            self.selected_asset = None;
+        }
+        let removed = external_changes::removed_assets(changes);
+        if !removed.is_empty() {
+            self.waveforms
+                .retain(|asset_id, _| !removed.contains(&asset_id.to_string().as_str()));
         }
     }
 

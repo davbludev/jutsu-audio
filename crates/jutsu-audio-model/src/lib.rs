@@ -295,6 +295,10 @@ pub enum AudioAssetSource {
         generator_type: String,
         algorithm_version: u32,
         seed: u64,
+        /// What the generator was run with. Omitted when empty, so a project
+        /// written before generators took parameters round-trips byte for byte.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        parameters: BTreeMap<String, ParameterValue>,
     },
     /// A synthesizer rather than a file: the clips referencing it carry the
     /// notes, and this carries what plays them.

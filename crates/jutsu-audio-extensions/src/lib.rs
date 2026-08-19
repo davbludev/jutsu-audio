@@ -6,9 +6,11 @@ use jutsu_audio_model::ParameterValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod builtin;
+pub mod recipe;
 pub mod voice;
 
 pub use builtin::register_builtin;
+pub use recipe::{GeneratorRecipe, RECIPE_CONTRACT_VERSION, RegenerateMode};
 pub use voice::{Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]

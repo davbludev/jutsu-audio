@@ -599,6 +599,7 @@ mod tests {
             resolve_asset_path(
                 Path::new("/projects/demo/demo.json"),
                 &AudioAssetSource::Generated {
+                    parameters: std::collections::BTreeMap::new(),
                     generator_type: "noise".into(),
                     algorithm_version: 1,
                     seed: 7,

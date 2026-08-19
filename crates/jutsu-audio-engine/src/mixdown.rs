@@ -44,8 +44,8 @@ pub struct SourceAudio {
 pub enum MixErrorCode {
     /// A clip names an asset the loader could not provide.
     SourceUnavailable,
-    /// A synth clip names an extension that is not registered, or parameters
-    /// the extension refuses.
+    /// A synth or generator clip names an extension that is not registered, or
+    /// parameters the extension refuses.
     SynthUnavailable,
     /// The timeline is longer than this machine can hold in memory.
     TooLong,
@@ -115,9 +115,9 @@ pub fn mix_project(
 
     let mut mix = vec![0.0_f32; total_frames * usize::from(MIX_CHANNELS)];
     for clip in clips {
-        match synth_source(project, clip) {
-            Some(synth) => {
-                let source = render_synth_clip(extensions, synth, clip, sample_rate)?;
+        match rendered_source(project, clip) {
+            Some(source) => {
+                let source = render_extension_clip(extensions, source, clip, sample_rate)?;
                 // The rendered buffer *is* the clip, so it is read from its
                 // start rather than from the clip's source offset.
                 let mut placed = clip.clone();
@@ -141,32 +141,62 @@ pub fn mix_project(
         .map_err(MixError::from)
 }
 
-/// The synth a clip plays, if it plays one.
-fn synth_source<'a>(project: &'a Project, clip: &Clip) -> Option<&'a AudioAssetSource> {
+/// The asset source a clip renders from an extension rather than a file: a
+/// synth played by the clip's notes, or a generator run from its seed.
+fn rendered_source<'a>(project: &'a Project, clip: &Clip) -> Option<&'a AudioAssetSource> {
     let asset = project
         .assets
         .iter()
         .find(|asset| asset.id == clip.asset_id)?;
-    matches!(asset.source, AudioAssetSource::Synth { .. }).then_some(&asset.source)
+    matches!(
+        asset.source,
+        AudioAssetSource::Synth { .. } | AudioAssetSource::Generated { .. }
+    )
+    .then_some(&asset.source)
 }
 
-/// Renders one synth clip's notes into a mono buffer as long as the clip.
+/// Renders one clip from an extension into a mono buffer as long as the clip.
 ///
 /// Every clip gets a fresh instance, reset before it plays: a mix is the same
 /// however many times it is rendered, and in whatever order.
-fn render_synth_clip(
+///
+/// ponytail: a generator is re-run on every mix rather than cached. Fine for
+/// one-shots; cache by recipe identity if long ambiences make a re-mix drag.
+fn render_extension_clip(
     extensions: &ExtensionRegistries,
     source: &AudioAssetSource,
     clip: &Clip,
     sample_rate: u32,
 ) -> Result<SourceAudio, MixError> {
-    let AudioAssetSource::Synth {
-        type_id,
-        parameters,
-        ..
-    } = source
-    else {
-        unreachable!("only called for synth assets");
+    let frames = usize::try_from(clip.duration_samples).map_err(|_| {
+        MixError::new(
+            MixErrorCode::TooLong,
+            format!("clip {} is longer than this machine can render", clip.id),
+        )
+    })?;
+    let (type_id, parameters) = match source {
+        AudioAssetSource::Synth {
+            type_id,
+            parameters,
+            ..
+        } => (type_id, parameters),
+        AudioAssetSource::Generated {
+            generator_type,
+            seed,
+            parameters,
+            ..
+        } => {
+            return render_generated_clip(
+                extensions,
+                generator_type,
+                *seed,
+                parameters,
+                frames,
+                sample_rate,
+                clip,
+            );
+        }
+        _ => unreachable!("only called for rendered assets"),
     };
     let type_id = ExtensionTypeId::new(type_id.clone()).map_err(|error| {
         MixError::new(
@@ -188,12 +218,6 @@ fn render_synth_clip(
     synth.prepare(sample_rate);
     synth.reset();
 
-    let frames = usize::try_from(clip.duration_samples).map_err(|_| {
-        MixError::new(
-            MixErrorCode::TooLong,
-            format!("clip {} is longer than this machine can render", clip.id),
-        )
-    })?;
     let mut events = Vec::with_capacity(clip.notes.len() * 2);
     for note in &clip.notes {
         let start = usize::try_from(note.start_frame).unwrap_or(usize::MAX);
@@ -208,6 +232,44 @@ fn render_synth_clip(
 
     let mut samples = vec![0.0_f32; frames];
     synth.render(&events, &mut samples);
+    Ok(SourceAudio {
+        sample_rate,
+        channels: 1,
+        samples: Arc::from(samples),
+    })
+}
+
+/// Runs a generator for the length of the clip. The seed and parameters come
+/// from the asset's provenance, so the same project always renders the same
+/// audio without storing the samples.
+#[allow(clippy::too_many_arguments)]
+fn render_generated_clip(
+    extensions: &ExtensionRegistries,
+    generator_type: &str,
+    seed: u64,
+    parameters: &std::collections::BTreeMap<String, ParameterValue>,
+    frames: usize,
+    sample_rate: u32,
+    clip: &Clip,
+) -> Result<SourceAudio, MixError> {
+    let type_id = ExtensionTypeId::new(generator_type).map_err(|error| {
+        MixError::new(
+            MixErrorCode::SynthUnavailable,
+            format!(
+                "clip {} names an invalid generator type: {}",
+                clip.id, error.message
+            ),
+        )
+    })?;
+    let generator = extensions
+        .instantiate_generator(&type_id, parameters)
+        .map_err(|error| {
+            MixError::new(
+                MixErrorCode::SynthUnavailable,
+                format!("clip {} cannot be generated: {}", clip.id, error.message),
+            )
+        })?;
+    let samples = generator.generate_mono(seed, frames);
     Ok(SourceAudio {
         sample_rate,
         channels: 1,

@@ -74,7 +74,9 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
 - `crates/jutsu-audio-extensions` — compile-time synth/effect/generator registries. `voice.rs` is
   the note lifecycle (events, envelope, seeded noise); `builtin.rs` the reference synths,
   registered by `register_builtin`. A synth's whole state is its parameters plus its descriptor's
-  `state_version` — there is no separate instance serialization.
+  `state_version` — there is no separate instance serialization. `recipe.rs` is the seeded
+  generator contract; `generators/` holds the SFX generators, one file each over a shared
+  `dsp.rs`.
 
 ## Tests worth knowing about
 

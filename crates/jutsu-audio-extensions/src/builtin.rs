@@ -313,6 +313,8 @@ impl SynthFactory for NoiseFactory {
                     default_value: ParameterValue::Integer(1),
                     introduced_in_state_version: 1,
                     automatable: false,
+                    minimum: None,
+                    maximum: None,
                 },
                 gain_db(),
                 envelope_time("attack_ms", "Attack", 0.0),
@@ -350,6 +352,8 @@ fn gain_db() -> ParameterDescriptor {
         default_value: ParameterValue::Float(0.0),
         introduced_in_state_version: 1,
         automatable: true,
+        minimum: None,
+        maximum: None,
     }
 }
 
@@ -361,6 +365,8 @@ fn envelope_time(id: &str, display_name: &str, default_ms: f64) -> ParameterDesc
         default_value: ParameterValue::Float(default_ms),
         introduced_in_state_version: 1,
         automatable: false,
+        minimum: None,
+        maximum: None,
     }
 }
 
@@ -372,6 +378,8 @@ fn text(id: &str, display_name: &str, default_value: &str) -> ParameterDescripto
         default_value: ParameterValue::Text(default_value.into()),
         introduced_in_state_version: 1,
         automatable: false,
+        minimum: None,
+        maximum: None,
     }
 }
 

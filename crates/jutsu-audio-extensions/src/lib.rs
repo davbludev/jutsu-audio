@@ -6,10 +6,12 @@ use jutsu_audio_model::ParameterValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod builtin;
+pub mod generators;
 pub mod recipe;
 pub mod voice;
 
 pub use builtin::register_builtin;
+pub use generators::{GeneratorPreset, register_sfx_generators};
 pub use recipe::{GeneratorRecipe, RECIPE_CONTRACT_VERSION, RegenerateMode};
 pub use voice::{Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
 
@@ -93,6 +95,14 @@ pub struct ParameterDescriptor {
     pub default_value: ParameterValue,
     pub introduced_in_state_version: u32,
     pub automatable: bool,
+    /// Bounds for numeric parameters. A value outside them is refused at
+    /// instantiation, so a generator body can read its parameters without
+    /// checking them, and a caller learns the range from the descriptor rather
+    /// than from documentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -392,8 +402,42 @@ fn validate_parameters(
                 parameter_id: Some(parameter_id.clone()),
             });
         }
+        if let Some(number) = numeric(value)
+            && let Some(message) = out_of_range(parameter, number)
+        {
+            return Err(ExtensionError {
+                code: ExtensionErrorCode::InvalidParameters,
+                message,
+                kind: Some(descriptor.kind),
+                type_id: Some(descriptor.type_id.clone()),
+                parameter_id: Some(parameter_id.clone()),
+            });
+        }
     }
     Ok(())
+}
+
+fn numeric(value: &ParameterValue) -> Option<f64> {
+    match value {
+        ParameterValue::Float(value) => Some(*value),
+        ParameterValue::Integer(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+/// The complaint to make about a numeric parameter, if any.
+fn out_of_range(parameter: &ParameterDescriptor, value: f64) -> Option<String> {
+    match (parameter.minimum, parameter.maximum) {
+        (Some(minimum), _) if value < minimum => Some(format!(
+            "parameter '{}' is below its minimum of {minimum}",
+            parameter.id
+        )),
+        (_, Some(maximum)) if value > maximum => Some(format!(
+            "parameter '{}' is above its maximum of {maximum}",
+            parameter.id
+        )),
+        _ => None,
+    }
 }
 
 fn unavailable_error(kind: ExtensionKind, type_id: &ExtensionTypeId) -> ExtensionError {

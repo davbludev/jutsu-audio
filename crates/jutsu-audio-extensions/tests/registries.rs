@@ -21,6 +21,8 @@ fn descriptor(kind: ExtensionKind, type_id: &str) -> ExtensionDescriptor {
             default_value: ParameterValue::Float(0.5),
             introduced_in_state_version: 1,
             automatable: true,
+            minimum: None,
+            maximum: None,
         }],
     }
 }

@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use jutsu_audio_extensions::{ExtensionRegistries, register_builtin};
+use jutsu_audio_extensions::{ExtensionRegistries, register_builtin, register_sfx_generators};
 
 /// The registries, initialised on first use. Registration happens here and
 /// nowhere else; nothing mutates them afterwards, which is what makes sharing
@@ -16,6 +16,7 @@ pub fn registries() -> &'static ExtensionRegistries {
     REGISTRIES.get_or_init(|| {
         let mut registries = ExtensionRegistries::default();
         register_builtin(&mut registries).expect("the built-in extensions register cleanly");
+        register_sfx_generators(&mut registries).expect("the SFX generators register cleanly");
         registries
     })
 }

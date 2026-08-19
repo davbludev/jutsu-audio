@@ -17,6 +17,10 @@ it has moved.
 - `src/timeline.rs` — timeline view state, painting and hit-testing. Returns `TimelineAction`
   rather than mutating, so edits still funnel through `main.rs`. Also home to
   `project_sample_rate` / `project_duration_frames`, which the rest of the GUI counts in.
+- `src/session_host.rs` — the GUI's side of the session protocol. Answers CLI requests from the
+  same `ProjectCommandEngine` the user's edits go through, and returns `ExternalEffect`s that
+  `main.rs::poll_session` folds into dirty state, mixdown and transport. Started/stopped by
+  `main.rs::sync_session` whenever `project_path` changes.
 - `src/theme.rs` — Console palette, egui style, and shared drawing helpers (peak meter, time
   formatting, elision). Change colours here, nowhere else.
 - `src/cli.rs` + `src/bin/jutsu-audio-cli.rs` — the machine surface. Reached through
@@ -42,7 +46,9 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   (`tests/offline_export.rs` asserts that).
 - `crates/jutsu-audio-session` — single-writer session layer. `protocol.rs` is the wire
   contract (newline-delimited JSON over loopback TCP), `discovery.rs` the `.session` sidecar a
-  client dials, `lock.rs` the `.lock` sidecar an offline writer takes. Contract:
+  client dials, `lock.rs` the `.lock` sidecar an offline writer takes, `server.rs`/`client.rs`
+  the two ends. The server never touches a `Project`: it hands `SessionCall`s to the owner.
+  Contract:
   `docs/design/jutsu-audio-session-protocol-v1.md`.
 - `crates/jutsu-audio-extensions` — compile-time synth/effect/generator registries.
 

@@ -4,6 +4,7 @@
 //! and file dialog happens on the worker (see [`worker`]), and every project
 //! mutation goes through the command engine — never directly.
 
+mod session_host;
 mod theme;
 mod timeline;
 mod worker;
@@ -23,6 +24,9 @@ use jutsu_audio_model::{
     AssetId, AudioAssetSource, Clip, ClipId, LayerId, ParameterValue, Project, TrackId,
 };
 use jutsu_audio_project::{ImportStatus, ProjectStore};
+use jutsu_audio_session::TransportAction;
+
+use session_host::{ExternalEffect, SessionHost};
 
 use timeline::{
     TimelineAction, TimelineContext, TimelineView, Tool, WaveformState, clip_gain_db,
@@ -152,6 +156,9 @@ struct JutsuAudioApp {
     waveforms: HashMap<AssetId, WaveformState>,
     timeline: TimelineView,
     status: Status,
+    /// Live while this window owns a project on disk. `None` for an unsaved
+    /// project: there is no path for a client to name yet.
+    session: Option<SessionHost>,
 }
 
 impl JutsuAudioApp {
@@ -210,6 +217,7 @@ impl JutsuAudioApp {
             waveforms: HashMap::new(),
             timeline: TimelineView::default(),
             status,
+            session: None,
         }
     }
 
@@ -459,6 +467,55 @@ impl JutsuAudioApp {
     }
 
     // ─── background work ────────────────────────────────────────────────────
+
+    // ─── live session ───────────────────────────────────────────────────────
+
+    /// Keeps the hosted session pointed at the project currently open. Opening,
+    /// saving somewhere new, or closing all move it.
+    fn sync_session(&mut self, context: &egui::Context) {
+        let wanted = self.project_path.as_deref();
+        if self.session.as_ref().map(SessionHost::path) == wanted {
+            return;
+        }
+        self.session = None;
+        let Some(path) = wanted else { return };
+        match SessionHost::start(path, context) {
+            Ok(host) => self.session = Some(host),
+            Err(message) => {
+                // The editor still works; only the machine surface is missing.
+                self.status = Status::error(format!("Live session unavailable: {message}"));
+            }
+        }
+    }
+
+    /// Answers whatever arrived over the session socket and folds the result
+    /// into the editor, exactly as if the user had made the edit here.
+    fn poll_session(&mut self) {
+        let Self {
+            session, commands, ..
+        } = self;
+        let Some(host) = session.as_ref() else { return };
+        let effects = host.poll(commands, self.unsaved);
+        for effect in effects {
+            match effect {
+                ExternalEffect::Applied { revision, .. } => {
+                    self.unsaved = true;
+                    self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
+                    self.mix_due = Some(Instant::now() + MIX_DEBOUNCE);
+                    self.status = Status::info(format!("External edit applied (r{revision})"));
+                }
+                ExternalEffect::Transport {
+                    action,
+                    position_frames,
+                } => match action {
+                    TransportAction::Play => self.play(),
+                    TransportAction::Pause => self.transport.pause(),
+                    TransportAction::Stop => self.transport.stop(),
+                    TransportAction::Seek => self.transport.seek(position_frames),
+                },
+            }
+        }
+    }
 
     fn dispatch_pending_work(&mut self) {
         let now = Instant::now();
@@ -805,6 +862,8 @@ impl JutsuAudioApp {
 impl eframe::App for JutsuAudioApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_results();
+        self.sync_session(context);
+        self.poll_session();
         self.dispatch_pending_work();
         self.sync_edit();
         self.meter = (self.meter * METER_DECAY).max(self.transport.peak_level());

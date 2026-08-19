@@ -1771,6 +1771,7 @@ dependencies = [
  "jutsu-audio-engine",
  "jutsu-audio-model",
  "jutsu-audio-project",
+ "jutsu-audio-session",
  "pollster",
  "rfd",
  "serde",

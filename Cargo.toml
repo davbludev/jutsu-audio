@@ -9,6 +9,7 @@ jutsu-audio-commands = { path = "crates/jutsu-audio-commands" }
 jutsu-audio-engine = { path = "crates/jutsu-audio-engine" }
 jutsu-audio-model = { path = "crates/jutsu-audio-model" }
 jutsu-audio-project = { path = "crates/jutsu-audio-project" }
+jutsu-audio-session = { path = "crates/jutsu-audio-session" }
 pollster = "0.4.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

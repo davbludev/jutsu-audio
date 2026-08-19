@@ -31,6 +31,13 @@ impl RequestId {
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
+
+    /// The raw UUID, so an owner can correlate a request with the command
+    /// envelope it produced.
+    #[must_use]
+    pub const fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for RequestId {

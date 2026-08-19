@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use jutsu_audio_commands::{
     COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandError, CommandErrorCode,
-    CommandId, ProjectCommandEngine,
+    CommandHistory, CommandId, ProjectCommandEngine,
 };
 use jutsu_audio_session::{
     RequestPayload, ResponsePayload, SessionCall, SessionClient, SessionError, SessionErrorCode,
@@ -66,10 +66,15 @@ impl SessionHost {
 
     /// Answers every queued request and reports what the editor still has to do
     /// about them. Called once per frame; never blocks.
-    pub fn poll(&self, engine: &mut ProjectCommandEngine, unsaved: bool) -> Vec<ExternalEffect> {
+    pub fn poll(
+        &self,
+        engine: &mut ProjectCommandEngine,
+        history: &mut CommandHistory,
+        unsaved: bool,
+    ) -> Vec<ExternalEffect> {
         let mut effects = Vec::new();
         while let Some(call) = self.server.try_recv() {
-            let (response, effect) = self.answer(&call, engine, unsaved);
+            let (response, effect) = self.answer(&call, engine, history, unsaved);
             call.respond(response);
             if let Some(effect) = effect {
                 effects.push(effect);
@@ -82,6 +87,7 @@ impl SessionHost {
         &self,
         call: &SessionCall,
         engine: &mut ProjectCommandEngine,
+        history: &mut CommandHistory,
         unsaved: bool,
     ) -> (SessionResponse, Option<ExternalEffect>) {
         let request = call.request();
@@ -111,7 +117,9 @@ impl SessionHost {
                     expected_revision: expected_revision.unwrap_or_else(|| engine.revision()),
                     commands: commands.clone(),
                 };
-                match engine.apply(envelope) {
+                // Recorded in the same history as edits made here, so undo
+                // reverses whatever happened to the project last.
+                match history.apply(engine, envelope) {
                     Ok(outcome) => (
                         SessionResponse::ok(
                             request_id,
@@ -186,6 +194,7 @@ mod tests {
         let path = directory.path().join("song.jutsu-audio.json");
         ProjectStore::save(&path, &project).expect("save");
         let mut engine = ProjectCommandEngine::new(project).expect("engine");
+        let mut history = CommandHistory::new();
         let host = SessionHost::start(&path, &egui::Context::default()).expect("host");
 
         let client_path = path.clone();
@@ -198,10 +207,10 @@ mod tests {
 
         let mut effects = Vec::new();
         while !client.is_finished() {
-            effects.extend(host.poll(&mut engine, false));
+            effects.extend(host.poll(&mut engine, &mut history, false));
             std::thread::yield_now();
         }
-        effects.extend(host.poll(&mut engine, false));
+        effects.extend(host.poll(&mut engine, &mut history, false));
         client.join().expect("client thread");
         (engine, effects)
     }

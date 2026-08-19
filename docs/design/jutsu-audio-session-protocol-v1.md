@@ -96,6 +96,14 @@ but cannot connect to its port knows the owner is gone. It deletes the session f
 back to the offline lock path. No process-liveness probing is needed, so no platform-specific
 code is.
 
+## Undo ordering
+
+Undo history belongs to the project, not to whoever made the edit. Every batch committed while
+the editor is open — from the UI or over this protocol — is recorded in one chronological stack
+with its inverse, so undo reverses the last thing that happened to the project. An undo is
+itself an ordinary forward batch: it takes the next revision, and a client watching revisions
+sees it like any other edit.
+
 ## Guarantees
 
 - A second writer cannot silently overwrite newer state: it either goes through the owner and

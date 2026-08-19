@@ -5,6 +5,7 @@
 //! mutation goes through the command engine — never directly.
 
 mod external_changes;
+mod recovery;
 mod session_host;
 mod theme;
 mod timeline;
@@ -16,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use jutsu_audio_commands::{
-    COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandId, EntityKind, ProjectCommand,
-    ProjectCommandEngine,
+    COMMAND_PROTOCOL_VERSION, ChangeEvent, CommandEnvelope, CommandHistory, CommandId, EntityKind,
+    ProjectCommand, ProjectCommandEngine,
 };
 use jutsu_audio_engine::{
     SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
@@ -25,9 +26,10 @@ use jutsu_audio_engine::{
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, Clip, ClipId, LayerId, ParameterValue, Project, TrackId,
 };
-use jutsu_audio_project::{ImportStatus, ProjectStore};
+use jutsu_audio_project::{ImportStatus, ProjectStore, autosave};
 use jutsu_audio_session::TransportAction;
 
+use recovery::{Decision, Recovery};
 use session_host::{ExternalEffect, SessionHost};
 
 use timeline::{
@@ -40,6 +42,9 @@ use worker::{Job, JobResult, MixClip, MixRequest, Worker, resolve_asset_path};
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
 /// How long editing has to settle before the timeline is re-mixed for playback.
 const MIX_DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long editing has to settle before unsaved work is parked in the
+/// recovery sidecar. Shorter than a save: this one is for crashes.
+const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(2_000);
 /// How long an edit that arrived over the session socket waits before the
 /// timeline is re-mixed. Short: nobody is still typing on the other end.
 const EXTERNAL_LATENCY: Duration = Duration::from_millis(50);
@@ -135,6 +140,7 @@ impl ClipEdit {
 
 struct JutsuAudioApp {
     commands: ProjectCommandEngine,
+    history: CommandHistory,
     project_path: Option<PathBuf>,
 
     selected_asset: Option<AssetId>,
@@ -153,6 +159,7 @@ struct JutsuAudioApp {
     active_mix: Option<u64>,
     mix_due: Option<Instant>,
     save_due: Option<Instant>,
+    autosave_due: Option<Instant>,
     save_in_flight: bool,
     unsaved: bool,
     dialog_open: bool,
@@ -164,6 +171,8 @@ struct JutsuAudioApp {
     /// Live while this window owns a project on disk. `None` for an unsaved
     /// project: there is no path for a client to name yet.
     session: Option<SessionHost>,
+    /// Unsaved work found after a crash, waiting for the user to decide.
+    recovery: Option<Recovery>,
 }
 
 impl JutsuAudioApp {
@@ -190,6 +199,14 @@ impl JutsuAudioApp {
             ProjectCommandEngine::new(ProjectStore::new_project("Untitled Project"))
                 .expect("a new project is valid")
         });
+        // A project named on the command line can also carry unsaved work from
+        // a crash. Offered, never applied on its own.
+        let recovery = project_path
+            .as_ref()
+            .and_then(|path| autosave::recover(path).ok().flatten())
+            .map(|recovered| Recovery {
+                project: Box::new(recovered.project),
+            });
         let transport = TransportController::new();
         let snapshots = SnapshotExchange::new(None);
         let (audio, audio_error) =
@@ -199,6 +216,7 @@ impl JutsuAudioApp {
             };
         Self {
             commands,
+            history: CommandHistory::new(),
             project_path,
             selected_asset: None,
             selected_clip: None,
@@ -215,6 +233,7 @@ impl JutsuAudioApp {
             // A project opened at startup still needs its audio built.
             mix_due: Some(Instant::now()),
             save_due: None,
+            autosave_due: None,
             save_in_flight: false,
             unsaved: false,
             dialog_open: false,
@@ -223,6 +242,7 @@ impl JutsuAudioApp {
             timeline: TimelineView::default(),
             status,
             session: None,
+            recovery,
         }
     }
 
@@ -245,11 +265,9 @@ impl JutsuAudioApp {
             expected_revision: self.commands.revision(),
             commands,
         };
-        match self.commands.apply(envelope) {
+        match self.history.apply(&mut self.commands, envelope) {
             Ok(_) => {
-                self.unsaved = true;
-                self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
-                self.mix_due = Some(Instant::now() + MIX_DEBOUNCE);
+                self.mark_edited(MIX_DEBOUNCE);
                 true
             }
             Err(error) => {
@@ -259,6 +277,48 @@ impl JutsuAudioApp {
                 self.edit = None;
                 false
             }
+        }
+    }
+
+    /// Records that the project changed: dirty flag, and the three deadlines
+    /// that follow an edit. `mix_after` differs for interactive and external
+    /// edits, and none of the deadlines is ever pushed back by a later edit —
+    /// a burst must not starve the work.
+    fn mark_edited(&mut self, mix_after: Duration) {
+        let now = Instant::now();
+        self.unsaved = true;
+        self.save_due.get_or_insert(now + SAVE_DEBOUNCE);
+        self.autosave_due.get_or_insert(now + AUTOSAVE_DEBOUNCE);
+        self.mix_due.get_or_insert(now + mix_after);
+    }
+
+    /// Reverses the last edit made to this project, whoever made it: the
+    /// history is chronological and shared with the session socket.
+    fn undo(&mut self) {
+        match self.history.undo(&mut self.commands) {
+            Some(Ok(_)) => {
+                self.mark_edited(MIX_DEBOUNCE);
+                self.edit = None;
+                self.status = Status::info("Undone");
+            }
+            Some(Err(error)) => {
+                self.status = Status::error(format!("Undo failed: {}", error.message));
+            }
+            None => self.status = Status::info("Nothing to undo"),
+        }
+    }
+
+    fn redo(&mut self) {
+        match self.history.redo(&mut self.commands) {
+            Some(Ok(_)) => {
+                self.mark_edited(MIX_DEBOUNCE);
+                self.edit = None;
+                self.status = Status::info("Redone");
+            }
+            Some(Err(error)) => {
+                self.status = Status::error(format!("Redo failed: {}", error.message));
+            }
+            None => self.status = Status::info("Nothing to redo"),
         }
     }
 
@@ -497,21 +557,18 @@ impl JutsuAudioApp {
     /// into the editor, exactly as if the user had made the edit here.
     fn poll_session(&mut self) {
         let Self {
-            session, commands, ..
+            session,
+            commands,
+            history,
+            ..
         } = self;
         let Some(host) = session.as_ref() else { return };
-        let effects = host.poll(commands, self.unsaved);
+        let effects = host.poll(commands, history, self.unsaved);
         for effect in effects {
             match effect {
                 ExternalEffect::Applied { revision, changes } => {
                     self.absorb_external(&changes);
-                    self.unsaved = true;
-                    // `get_or_insert`, not a fresh deadline: a burst of external
-                    // edits must not keep pushing the audio rebuild out of
-                    // reach. The first edit of a burst fixes when it lands.
-                    let now = Instant::now();
-                    self.save_due.get_or_insert(now + SAVE_DEBOUNCE);
-                    self.mix_due.get_or_insert(now + EXTERNAL_LATENCY);
+                    self.mark_edited(EXTERNAL_LATENCY);
                     self.status = Status::info(format!("External edit applied (r{revision})"));
                 }
                 ExternalEffect::Transport {
@@ -563,6 +620,18 @@ impl JutsuAudioApp {
             self.save_due = None;
             self.save_in_flight = true;
             self.send(Job::Save {
+                path,
+                project: Box::new(self.project().clone()),
+            });
+        }
+
+        if self.autosave_due.is_some_and(|due| now >= due)
+            && let Some(path) = self.project_path.clone()
+        {
+            self.autosave_due = None;
+            // Parked even while a save is in flight: the save may be writing
+            // state that a further edit has already moved on from.
+            self.send(Job::Autosave {
                 path,
                 project: Box::new(self.project().clone()),
             });
@@ -687,6 +756,9 @@ impl JutsuAudioApp {
                             // in flight; only clear the flag if none did.
                             if self.save_due.is_none() {
                                 self.unsaved = false;
+                                // The save already removed the sidecar; no
+                                // point parking state that is now on disk.
+                                self.autosave_due = None;
                                 self.status = Status::info("Saved");
                             }
                             self.mix_due.get_or_insert_with(Instant::now);
@@ -700,12 +772,19 @@ impl JutsuAudioApp {
                 JobResult::Opened(outcome) => {
                     self.dialog_open = false;
                     match *outcome {
-                        Ok((path, project)) => match ProjectCommandEngine::new(project) {
+                        Ok(opened) => match ProjectCommandEngine::new(opened.project) {
                             Ok(commands) => {
                                 self.commands = commands;
-                                self.project_path = Some(path);
+                                self.project_path = Some(opened.path);
                                 self.reset_for_new_project();
-                                self.status = Status::info("Project opened");
+                                self.recovery = opened.recovered.map(|project| Recovery {
+                                    project: Box::new(project),
+                                });
+                                self.status = if self.recovery.is_some() {
+                                    Status::info("Unsaved work was recovered")
+                                } else {
+                                    Status::info("Project opened")
+                                };
                             }
                             Err(error) => {
                                 self.status =
@@ -768,6 +847,11 @@ impl JutsuAudioApp {
                         },
                     );
                 }
+                JobResult::Autosaved(result) => {
+                    if let Err(message) = result {
+                        self.status = Status::error(format!("Recovery file failed: {message}"));
+                    }
+                }
                 JobResult::Cancelled => {
                     self.dialog_open = false;
                     self.exporting = false;
@@ -788,6 +872,10 @@ impl JutsuAudioApp {
         self.timeline = TimelineView::default();
         self.unsaved = false;
         self.save_due = None;
+        self.autosave_due = None;
+        // Inverses only make sense against the project they were computed for.
+        self.history.clear();
+        self.recovery = None;
         self.mix_due = Some(Instant::now());
     }
 
@@ -904,7 +992,10 @@ impl eframe::App for JutsuAudioApp {
         self.library_panel(context);
         self.inspector_panel(context);
         self.timeline_panel(context);
-        self.shortcuts(context);
+        self.recovery_prompt(context);
+        if self.recovery.is_none() {
+            self.shortcuts(context);
+        }
 
         // Only keep the frame loop hot while something is actually moving.
         let busy = self.transport.state() == TransportState::Playing
@@ -919,21 +1010,69 @@ impl eframe::App for JutsuAudioApp {
 }
 
 impl JutsuAudioApp {
+    /// Offers recovered work, and acts on the answer. Restoring loads the
+    /// recovered project into the editor and leaves the file untouched until
+    /// the next save; keeping the saved project deletes the recovery file.
+    fn recovery_prompt(&mut self, context: &egui::Context) {
+        let Some(recovery) = self.recovery.as_ref() else {
+            return;
+        };
+        let Some(decision) = recovery::prompt(context, recovery) else {
+            return;
+        };
+        let recovery = self.recovery.take().expect("the prompt was open");
+        match decision {
+            Decision::Restore => match ProjectCommandEngine::new(*recovery.project) {
+                Ok(commands) => {
+                    self.commands = commands;
+                    self.history.clear();
+                    self.selected_clip = None;
+                    self.edit = None;
+                    self.mark_edited(MIX_DEBOUNCE);
+                    self.status = Status::info("Recovered edits restored - save to keep them");
+                }
+                Err(error) => {
+                    self.status =
+                        Status::error(format!("Recovered work is invalid: {}", error.message));
+                }
+            },
+            Decision::Discard => {
+                if let Some(path) = self.project_path.clone() {
+                    self.send(Job::DiscardAutosave { path });
+                }
+                self.status = Status::info("Kept the saved project");
+            }
+        }
+    }
+
     fn shortcuts(&mut self, context: &egui::Context) {
         if context.wants_keyboard_input() {
             return;
         }
-        let (space, delete, save, zoom_in, zoom_out, fit, stop) = context.input(|input| {
-            (
-                input.key_pressed(egui::Key::Space),
-                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
-                input.modifiers.command && input.key_pressed(egui::Key::S),
-                input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
-                input.key_pressed(egui::Key::Minus),
-                input.key_pressed(egui::Key::F),
-                input.key_pressed(egui::Key::Escape),
-            )
-        });
+        let (space, delete, save, zoom_in, zoom_out, fit, stop, undo, redo) =
+            context.input(|input| {
+                (
+                    input.key_pressed(egui::Key::Space),
+                    input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
+                    input.modifiers.command && input.key_pressed(egui::Key::S),
+                    input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
+                    input.key_pressed(egui::Key::Minus),
+                    input.key_pressed(egui::Key::F),
+                    input.key_pressed(egui::Key::Escape),
+                    input.modifiers.command
+                        && !input.modifiers.shift
+                        && input.key_pressed(egui::Key::Z),
+                    input.modifiers.command
+                        && (input.key_pressed(egui::Key::Y)
+                            || (input.modifiers.shift && input.key_pressed(egui::Key::Z))),
+                )
+            });
+        if undo {
+            self.undo();
+        }
+        if redo {
+            self.redo();
+        }
         if space {
             self.toggle_playback();
         }
@@ -1038,6 +1177,18 @@ impl JutsuAudioApp {
                         }
                         if theme::flat_button(ui, "Open").clicked() {
                             self.open_project();
+                        }
+                        let redo = ui.add_enabled_ui(self.history.can_redo(), |ui| {
+                            theme::flat_button(ui, "Redo").on_hover_text("Ctrl+Shift+Z")
+                        });
+                        if redo.inner.clicked() {
+                            self.redo();
+                        }
+                        let undo = ui.add_enabled_ui(self.history.can_undo(), |ui| {
+                            theme::flat_button(ui, "Undo").on_hover_text("Ctrl+Z")
+                        });
+                        if undo.inner.clicked() {
+                            self.undo();
                         }
                     });
                 });

@@ -6,6 +6,10 @@ use jutsu_audio_model::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod history;
+
+pub use history::{CommandHistory, HISTORY_LIMIT, invert};
+
 pub const COMMAND_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -255,7 +259,7 @@ impl ProjectCommandEngine {
     }
 }
 
-fn apply_command(
+pub(crate) fn apply_command(
     project: &mut Project,
     command: &ProjectCommand,
     command_index: usize,

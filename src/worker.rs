@@ -15,7 +15,7 @@ use eframe::egui;
 use jutsu_audio_engine::{ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot};
 use jutsu_audio_model::{AssetId, AudioAssetSource, Project};
 use jutsu_audio_project::{
-    AssetManager, AudioMetadata, CachedWaveform, ImportMode, ImportStatus, ProjectStore,
+    AssetManager, AudioMetadata, CachedWaveform, ImportMode, ImportStatus, ProjectStore, autosave,
 };
 
 /// One clip flattened into everything the mixdown needs, so the worker never
@@ -56,6 +56,13 @@ pub enum Job {
     },
     /// Ask for a destination, then write the current mix out.
     Export { snapshot: Arc<PlaybackSnapshot> },
+    /// Park unsaved work in the recovery sidecar.
+    Autosave {
+        path: PathBuf,
+        project: Box<Project>,
+    },
+    /// Throw away parked work the user chose not to recover.
+    DiscardAutosave { path: PathBuf },
     /// Load peaks for one asset, rebuilding the cache if it is missing.
     Waveform {
         asset_id: AssetId,
@@ -63,6 +70,15 @@ pub enum Job {
         source: PathBuf,
         fingerprint: String,
     },
+}
+
+#[derive(Debug)]
+pub struct OpenOutcome {
+    pub path: PathBuf,
+    pub project: Project,
+    /// Unsaved work found parked next to the project after a crash. Offered to
+    /// the user; never applied on its own.
+    pub recovered: Option<Project>,
 }
 
 #[derive(Debug)]
@@ -88,7 +104,9 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<(), String>,
     },
-    Opened(Box<Result<(PathBuf, Project), String>>),
+    Opened(Box<Result<OpenOutcome, String>>),
+    /// An autosave write or discard finished. Only failures need reporting.
+    Autosaved(Result<(), String>),
     Imported(Box<Result<ImportOutcome, String>>),
     Exported(Result<u64, String>),
     Waveform {
@@ -139,7 +157,10 @@ fn run(job: Job, cache: &mut DecodeCache) -> JobResult {
     match job {
         Job::Mixdown(request) => mixdown(request, cache),
         Job::Save { path, project } => JobResult::Saved {
-            result: ProjectStore::save(&path, &project).map_err(|error| error.message),
+            result: ProjectStore::save(&path, &project)
+                // The saved file now holds everything the sidecar did.
+                .and_then(|()| autosave::discard(&path))
+                .map_err(|error| error.message),
             path,
         },
         Job::SaveAs { project } => match pick_project_destination() {
@@ -150,13 +171,15 @@ fn run(job: Job, cache: &mut DecodeCache) -> JobResult {
             None => JobResult::Cancelled,
         },
         Job::Open => match pick_project_source() {
-            Some(path) => JobResult::Opened(Box::new(
-                ProjectStore::open(&path)
-                    .map(|opened| (path, opened.project))
-                    .map_err(|error| error.message),
-            )),
+            Some(path) => JobResult::Opened(Box::new(open(path))),
             None => JobResult::Cancelled,
         },
+        Job::Autosave { path, project } => {
+            JobResult::Autosaved(autosave::write(&path, &project).map_err(|error| error.message))
+        }
+        Job::DiscardAutosave { path } => {
+            JobResult::Autosaved(autosave::discard(&path).map_err(|error| error.message))
+        }
         Job::Import {
             project,
             project_path,
@@ -187,6 +210,22 @@ fn run(job: Job, cache: &mut DecodeCache) -> JobResult {
                 .map_err(|error| error.message),
         },
     }
+}
+
+/// Opens a project and looks for unsaved work parked beside it. A recovery
+/// file that cannot be read is not fatal: the saved project still opens, and
+/// the sidecar is simply not offered.
+fn open(path: PathBuf) -> Result<OpenOutcome, String> {
+    let opened = ProjectStore::open(&path).map_err(|error| error.message)?;
+    let recovered = autosave::recover(&path)
+        .ok()
+        .flatten()
+        .map(|recovered| recovered.project);
+    Ok(OpenOutcome {
+        path,
+        project: opened.project,
+        recovered,
+    })
 }
 
 // ─── mixdown ────────────────────────────────────────────────────────────────

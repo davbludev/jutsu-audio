@@ -315,6 +315,7 @@ impl SynthFactory for NoiseFactory {
                     automatable: false,
                     minimum: None,
                     maximum: None,
+                    unit: None,
                 },
                 gain_db(),
                 envelope_time("attack_ms", "Attack", 0.0),
@@ -354,6 +355,7 @@ fn gain_db() -> ParameterDescriptor {
         automatable: true,
         minimum: None,
         maximum: None,
+        unit: None,
     }
 }
 
@@ -367,6 +369,7 @@ fn envelope_time(id: &str, display_name: &str, default_ms: f64) -> ParameterDesc
         automatable: false,
         minimum: None,
         maximum: None,
+        unit: None,
     }
 }
 
@@ -380,6 +383,7 @@ fn text(id: &str, display_name: &str, default_value: &str) -> ParameterDescripto
         automatable: false,
         minimum: None,
         maximum: None,
+        unit: None,
     }
 }
 

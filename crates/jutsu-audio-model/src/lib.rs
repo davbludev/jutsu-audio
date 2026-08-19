@@ -52,6 +52,7 @@ entity_id!(LayerId);
 entity_id!(ClipId);
 entity_id!(BusId);
 entity_id!(MarkerId);
+entity_id!(AutomationId);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Project {
@@ -69,6 +70,98 @@ pub struct Project {
     /// The region playback repeats over, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_region: Option<LoopRegion>,
+    /// Parameter values that move over time. One lane per target parameter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<AutomationLane>,
+}
+
+/// What a lane writes to. Named by entity ID, so a lane survives everything
+/// except deleting what it automates.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutomationTarget {
+    Track { track_id: TrackId },
+    Bus { bus_id: BusId },
+    Clip { clip_id: ClipId },
+}
+
+/// How a value travels from one breakpoint to the next.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Curve {
+    /// Holds until the next breakpoint, then jumps. For switches and choices.
+    Step,
+    /// Straight line to the next breakpoint. The default, and what a fader does.
+    #[default]
+    Linear,
+}
+
+/// One point on a lane: a value at a frame, and how it reaches the next.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Breakpoint {
+    pub frame: u64,
+    pub value: f64,
+    #[serde(default)]
+    pub curve: Curve,
+}
+
+/// One parameter of one entity, moving over time.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AutomationLane {
+    pub id: AutomationId,
+    pub target: AutomationTarget,
+    /// The parameter ID this lane writes, e.g. `gain_db`.
+    pub parameter: String,
+    /// Breakpoints in frame order. An empty lane is inert rather than invalid:
+    /// it is what a lane looks like before its first point is drawn.
+    #[serde(default)]
+    pub points: Vec<Breakpoint>,
+}
+
+impl AutomationLane {
+    /// The value at a frame: held before the first point, interpolated
+    /// between points, held after the last.
+    ///
+    /// `None` for an empty lane, which means "whatever the parameter already
+    /// says" rather than any particular number.
+    #[must_use]
+    pub fn value_at(&self, frame: u64) -> Option<f64> {
+        let first = self.points.first()?;
+        if frame <= first.frame {
+            return Some(first.value);
+        }
+        let last = self.points.last()?;
+        if frame >= last.frame {
+            return Some(last.value);
+        }
+        let index = self
+            .points
+            .partition_point(|point| point.frame <= frame)
+            .saturating_sub(1);
+        let start = &self.points[index];
+        let end = self.points.get(index + 1)?;
+        Some(match start.curve {
+            Curve::Step => start.value,
+            Curve::Linear => {
+                let span = end.frame.saturating_sub(start.frame);
+                if span == 0 {
+                    end.value
+                } else {
+                    let progress = (frame - start.frame) as f64 / span as f64;
+                    start.value + (end.value - start.value) * progress
+                }
+            }
+        })
+    }
+
+    /// True when the points are in frame order, which is what `value_at`
+    /// assumes and what validation enforces.
+    #[must_use]
+    pub fn is_ordered(&self) -> bool {
+        self.points
+            .windows(2)
+            .all(|pair| pair[0].frame <= pair[1].frame)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -167,6 +260,21 @@ impl Project {
             "markers",
             &mut diagnostics,
         );
+        validate_unique_ids(
+            self.automation.iter().map(|lane| lane.id),
+            "automation",
+            &mut diagnostics,
+        );
+        for (lane_index, lane) in self.automation.iter().enumerate() {
+            if !lane.is_ordered() {
+                diagnostics.push(ValidationDiagnostic::new(
+                    ValidationCode::UnorderedAutomation,
+                    format!("automation[{lane_index}].points"),
+                    Some(lane.id.to_string()),
+                    "automation breakpoints must be in frame order",
+                ));
+            }
+        }
 
         if let Some(region) = self.loop_region
             && region.end_frame <= region.start_frame
@@ -211,6 +319,29 @@ impl Project {
                     format!("buses[{bus_index}].output_bus_id"),
                     Some(bus.id.to_string()),
                     "bus routing loops back on itself",
+                ));
+            }
+        }
+
+        for (lane_index, lane) in self.automation.iter().enumerate() {
+            let exists = match lane.target {
+                AutomationTarget::Track { track_id } => {
+                    self.tracks.iter().any(|track| track.id == track_id)
+                }
+                AutomationTarget::Bus { bus_id } => bus_ids.contains(&bus_id),
+                AutomationTarget::Clip { clip_id } => self
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.layers)
+                    .flat_map(|layer| &layer.clips)
+                    .any(|clip| clip.id == clip_id),
+            };
+            if !exists {
+                diagnostics.push(ValidationDiagnostic::new(
+                    ValidationCode::MissingAutomationTarget,
+                    format!("automation[{lane_index}].target"),
+                    Some(lane.id.to_string()),
+                    "automation lane targets something that does not exist",
                 ));
             }
         }
@@ -419,6 +550,8 @@ pub enum ValidationCode {
     InvalidClipRange,
     InvalidLoopRegion,
     BusCycle,
+    UnorderedAutomation,
+    MissingAutomationTarget,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

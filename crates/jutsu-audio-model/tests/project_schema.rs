@@ -33,6 +33,7 @@ fn valid_project() -> Project {
         master_bus_id: bus_id,
         markers: Vec::new(),
         loop_region: None,
+        automation: Vec::new(),
         tracks: vec![Track {
             id: TrackId::new(),
             name: "Impact".into(),

@@ -194,6 +194,7 @@ pub fn ranged(
         automatable: false,
         minimum: Some(minimum),
         maximum: Some(maximum),
+        unit: None,
     }
 }
 
@@ -215,6 +216,7 @@ pub fn counted(
         automatable: false,
         minimum: Some(minimum as f64),
         maximum: Some(maximum as f64),
+        unit: None,
     }
 }
 

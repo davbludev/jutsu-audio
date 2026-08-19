@@ -1,8 +1,9 @@
 use std::fmt;
 
 use jutsu_audio_model::{
-    Asset, AssetId, AudioAssetSource, BusId, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion,
-    Marker, MarkerId, MixerBus, ParameterValue, Project, Track, TrackId, ValidationDiagnostic,
+    Asset, AssetId, AudioAssetSource, AutomationId, AutomationLane, Breakpoint, BusId, Clip,
+    ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker, MarkerId, MixerBus, ParameterValue,
+    Project, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -169,6 +170,18 @@ pub enum ProjectCommand {
         key: String,
         value: ParameterValue,
     },
+    AddAutomationLane {
+        lane: AutomationLane,
+    },
+    RemoveAutomationLane {
+        automation_id: AutomationId,
+    },
+    /// Replaces a lane's breakpoints. One command rather than per-point edits,
+    /// so drawing a curve is one undo step.
+    SetAutomationPoints {
+        automation_id: AutomationId,
+        points: Vec<Breakpoint>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -190,6 +203,7 @@ pub enum EntityKind {
     Marker,
     LoopRegion,
     Bus,
+    Automation,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -775,6 +789,62 @@ pub(crate) fn apply_command(
                 kind: ChangeKind::Updated,
                 entity_kind: EntityKind::Bus,
                 entity_id: bus_id.to_string(),
+            }
+        }
+        ProjectCommand::AddAutomationLane { lane } => {
+            project.automation.push(lane.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Automation,
+                entity_id: lane.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveAutomationLane { automation_id } => {
+            let index = project
+                .automation
+                .iter()
+                .position(|lane| lane.id == *automation_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("automation lane {automation_id} does not exist"),
+                    )
+                })?;
+            project.automation.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Automation,
+                entity_id: automation_id.to_string(),
+            }
+        }
+        ProjectCommand::SetAutomationPoints {
+            automation_id,
+            points,
+        } => {
+            let lane = project
+                .automation
+                .iter_mut()
+                .find(|lane| lane.id == *automation_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("automation lane {automation_id} does not exist"),
+                    )
+                })?;
+            lane.points.clone_from(points);
+            // Sorting here rather than refusing: a caller drawing points has no
+            // reason to care what order they arrived in, and validation would
+            // otherwise reject a perfectly clear intent.
+            lane.points.sort_by_key(|point| point.frame);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Automation,
+                entity_id: automation_id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

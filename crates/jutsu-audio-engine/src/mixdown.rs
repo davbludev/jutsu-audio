@@ -14,7 +14,8 @@ use jutsu_audio_extensions::{ExtensionRegistries, ExtensionTypeId, NoteEvent};
 use std::collections::BTreeMap;
 
 use jutsu_audio_model::{
-    AssetId, AudioAssetSource, BusId, Clip, ParameterValue, Project, Track, TrackId,
+    AssetId, AudioAssetSource, AutomationLane, AutomationTarget, BusId, Clip, ParameterValue,
+    Project, Track, TrackId,
 };
 
 use crate::{PlaybackSnapshot, SnapshotError};
@@ -160,7 +161,11 @@ pub fn mix_project_metered(
                 &mut load,
             )?;
         }
-        apply_strip(&mut track_buffer, &track.parameters);
+        apply_strip(
+            &mut track_buffer,
+            &track.parameters,
+            &lanes_for(project, AutomationTarget::Track { track_id: track.id }),
+        );
         meters.tracks.insert(track.id, peak_of(&track_buffer));
         if let Some(bus) = bus_buffers.get_mut(&track.output_bus_id) {
             add_into(bus, &track_buffer);
@@ -179,7 +184,11 @@ pub fn mix_project_metered(
             .find(|bus| bus.id == bus_id)
             .map(|bus| &bus.parameters);
         if let Some(parameters) = parameters {
-            apply_strip(&mut buffer, parameters);
+            apply_strip(
+                &mut buffer,
+                parameters,
+                &lanes_for(project, AutomationTarget::Bus { bus_id }),
+            );
         }
         meters.buses.insert(bus_id, peak_of(&buffer));
 
@@ -301,24 +310,65 @@ fn render_one_clip(
     Ok(())
 }
 
+/// The lanes writing to one target, in project order.
+fn lanes_for(project: &Project, target: AutomationTarget) -> Vec<&AutomationLane> {
+    project
+        .automation
+        .iter()
+        .filter(|lane| lane.target == target)
+        .collect()
+}
+
 /// A channel strip: level and stereo position, from the same parameter keys a
 /// clip uses. Muted strips are already excluded from the sum.
-fn apply_strip(buffer: &mut [f32], parameters: &BTreeMap<String, ParameterValue>) {
-    let gain = match parameters.get(GAIN_DB_KEY) {
-        Some(ParameterValue::Float(value)) => 10_f32.powf(*value as f32 / 20.0),
-        _ => 1.0,
+///
+/// Automation is evaluated per frame. A fader move is a curve, not a step, so
+/// evaluating per block would stair-step it back into the clicks the crossfade
+/// exists to avoid.
+fn apply_strip(
+    buffer: &mut [f32],
+    parameters: &BTreeMap<String, ParameterValue>,
+    lanes: &[&AutomationLane],
+) {
+    let static_gain_db = match parameters.get(GAIN_DB_KEY) {
+        Some(ParameterValue::Float(value)) => *value,
+        _ => 0.0,
     };
-    let pan = match parameters.get(PAN_KEY) {
+    let static_pan = match parameters.get(PAN_KEY) {
         Some(ParameterValue::Float(value)) => value.clamp(-1.0, 1.0),
         _ => 0.0,
     };
-    if (gain - 1.0).abs() < f32::EPSILON && pan.abs() < f64::EPSILON {
+    let gain_lane = lanes
+        .iter()
+        .find(|lane| lane.parameter == GAIN_DB_KEY)
+        .copied();
+    let pan_lane = lanes.iter().find(|lane| lane.parameter == PAN_KEY).copied();
+
+    if gain_lane.is_none()
+        && pan_lane.is_none()
+        && static_gain_db.abs() < f64::EPSILON
+        && static_pan.abs() < f64::EPSILON
+    {
         return;
     }
-    let (left, right) = pan_gains(pan);
-    let channel_gain = [gain * left, gain * right];
-    for (index, sample) in buffer.iter_mut().enumerate() {
-        *sample *= channel_gain[index % usize::from(MIX_CHANNELS)];
+
+    let channels = usize::from(MIX_CHANNELS);
+    for frame in 0..buffer.len() / channels {
+        // A lane replaces the stored value wherever it has one; where it has
+        // none — an empty lane — the stored value still stands.
+        let gain_db = gain_lane
+            .and_then(|lane| lane.value_at(frame as u64))
+            .unwrap_or(static_gain_db);
+        let pan = pan_lane
+            .and_then(|lane| lane.value_at(frame as u64))
+            .unwrap_or(static_pan)
+            .clamp(-1.0, 1.0);
+        let gain = 10_f32.powf(gain_db as f32 / 20.0);
+        let (left, right) = pan_gains(pan);
+        let channel_gain = [gain * left, gain * right];
+        for channel in 0..channels {
+            buffer[frame * channels + channel] *= channel_gain[channel];
+        }
     }
 }
 

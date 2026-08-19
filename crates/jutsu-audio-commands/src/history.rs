@@ -362,6 +362,32 @@ fn invert_command(
                     .unwrap_or(ParameterValue::Float(0.0)),
             }
         }
+        ProjectCommand::AddAutomationLane { lane } => ProjectCommand::RemoveAutomationLane {
+            automation_id: lane.id,
+        },
+        ProjectCommand::RemoveAutomationLane { automation_id } => {
+            let lane = project
+                .automation
+                .iter()
+                .find(|lane| lane.id == *automation_id)
+                .ok_or_else(|| {
+                    missing(format!("automation lane {automation_id} does not exist"))
+                })?;
+            ProjectCommand::AddAutomationLane { lane: lane.clone() }
+        }
+        ProjectCommand::SetAutomationPoints { automation_id, .. } => {
+            let lane = project
+                .automation
+                .iter()
+                .find(|lane| lane.id == *automation_id)
+                .ok_or_else(|| {
+                    missing(format!("automation lane {automation_id} does not exist"))
+                })?;
+            ProjectCommand::SetAutomationPoints {
+                automation_id: *automation_id,
+                points: lane.points.clone(),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

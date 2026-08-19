@@ -38,6 +38,7 @@ fn builder() -> Builder {
             master_bus_id: bus_id,
             markers: Vec::new(),
             loop_region: None,
+            automation: Vec::new(),
             tracks: Vec::new(),
         },
         bus_id,

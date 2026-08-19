@@ -23,6 +23,7 @@ fn descriptor(kind: ExtensionKind, type_id: &str) -> ExtensionDescriptor {
             automatable: true,
             minimum: None,
             maximum: None,
+            unit: None,
         }],
     }
 }

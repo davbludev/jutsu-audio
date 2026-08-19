@@ -80,3 +80,24 @@ A marker is `{ id, name, frame }`, where `frame` is a project frame. IDs are sta
 `loop_region` is `{ start_frame, end_frame, enabled }`, half-open: `start_frame` plays,
 `end_frame` does not. Validation rejects a region whose end is not after its start. `enabled`
 exists so switching looping off does not lose where the loop was.
+
+## Automation (additive)
+
+`automation` is an optional list of lanes, omitted when empty. A lane is:
+
+```json
+{
+  "id": "…",
+  "target": { "type": "track", "track_id": "…" },
+  "parameter": "gain_db",
+  "points": [ { "frame": 0, "value": -60.0, "curve": "linear" } ]
+}
+```
+
+`target` is `track`, `bus` or `clip`; `parameter` is the parameter ID the lane writes. Points are
+in frame order — validation rejects a lane that is not, and the command that sets points sorts
+them rather than making a caller do it.
+
+A value is held before the first point, interpolated to the next (`linear`) or held until it
+(`step`), and held after the last. A lane with no points is inert: the stored parameter value
+still stands. A lane whose target no longer exists is a validation error, not silence.

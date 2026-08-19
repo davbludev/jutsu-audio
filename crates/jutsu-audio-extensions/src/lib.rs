@@ -7,11 +7,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod builtin;
 pub mod generators;
+pub mod parameters;
 pub mod recipe;
 pub mod voice;
 
 pub use builtin::register_builtin;
 pub use generators::{GeneratorPreset, register_sfx_generators};
+pub use parameters::{strip_parameters, validate_named, validate_value};
 pub use recipe::{GeneratorRecipe, RECIPE_CONTRACT_VERSION, RegenerateMode};
 pub use voice::{Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
 
@@ -103,6 +105,10 @@ pub struct ParameterDescriptor {
     pub minimum: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
+    /// What the value means: decibels, hertz, milliseconds. Display only — the
+    /// number is whatever the descriptor says it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

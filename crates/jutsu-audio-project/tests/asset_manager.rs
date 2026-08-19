@@ -176,3 +176,45 @@ fn cached_waveform_is_readable_back_and_rebuildable_after_deletion() {
     assert_eq!(rebuilt, prepared.waveform);
     assert!(cache_path.exists());
 }
+
+#[test]
+fn a_cache_from_an_older_build_is_refused_and_rebuilt_rather_than_drawn_from() {
+    let directory = tempdir().unwrap();
+    let project_path = directory.path().join("sfx.jutsu-audio.json");
+    let source_path = directory.path().join("source.wav");
+    write_pcm16(&source_path, &[i16::MIN, 0, i16::MAX, 0]);
+    let project = ProjectStore::new_project("SFX");
+
+    let prepared = AssetManager::prepare_wav_import(
+        &project,
+        &project_path,
+        &source_path,
+        ImportMode::CopyIntoProject,
+    )
+    .unwrap();
+    let AudioAssetSource::ManagedFile { fingerprint, .. } =
+        &prepared.asset.as_ref().unwrap().source
+    else {
+        panic!("import produces a managed file");
+    };
+
+    // What a build before multiresolution peaks wrote: readable, but without
+    // the levels a zoomed-out view needs.
+    let cache_path = AssetManager::waveform_cache_path(&project_path, fingerprint);
+    let mut older = serde_json::to_value(&prepared.waveform).unwrap();
+    older.as_object_mut().unwrap().remove("coarser");
+    older.as_object_mut().unwrap().remove("format_version");
+    fs::write(&cache_path, serde_json::to_vec(&older).unwrap()).unwrap();
+
+    assert!(
+        AssetManager::load_waveform(&project_path, fingerprint).is_err(),
+        "an older cache must not be half-used"
+    );
+
+    let rebuilt = AssetManager::rebuild_waveform(&project_path, &source_path, fingerprint).unwrap();
+    assert!(rebuilt.is_current());
+    assert_eq!(
+        AssetManager::load_waveform(&project_path, fingerprint).unwrap(),
+        rebuilt
+    );
+}

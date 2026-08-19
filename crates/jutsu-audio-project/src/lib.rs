@@ -14,6 +14,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub mod autosave;
+pub mod waveform;
+
+pub use waveform::{
+    BASE_WINDOW_FRAMES, CACHE_FORMAT_VERSION, CachedWaveform, PeakLevel, WaveformPeak,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectFileErrorCode {
@@ -82,19 +87,6 @@ pub struct AudioMetadata {
     pub frame_count: u64,
     pub bits_per_sample: u16,
     pub sample_format: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WaveformPeak {
-    pub minimum: f32,
-    pub maximum: f32,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct CachedWaveform {
-    pub metadata: AudioMetadata,
-    pub window_frames: u64,
-    pub peaks: Vec<WaveformPeak>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -285,13 +277,26 @@ impl AssetManager {
         let cache_path = Self::waveform_cache_path(project_path, fingerprint);
         let contents = fs::read(&cache_path)
             .map_err(|error| ProjectFileError::io(&cache_path, "read waveform cache", error))?;
-        serde_json::from_slice(&contents).map_err(|error| {
+        let waveform: CachedWaveform = serde_json::from_slice(&contents).map_err(|error| {
             ProjectFileError::new(
                 ProjectFileErrorCode::InvalidJson,
                 &cache_path,
                 format!("waveform cache is not valid: {error}"),
             )
-        })
+        })?;
+        if !waveform.is_current() {
+            // Readable, but written before the zoom levels existed. Reporting
+            // it as unusable is what makes the caller rebuild it.
+            return Err(ProjectFileError::new(
+                ProjectFileErrorCode::InvalidJson,
+                &cache_path,
+                format!(
+                    "waveform cache is format {} and this build reads {CACHE_FORMAT_VERSION}",
+                    waveform.format_version
+                ),
+            ));
+        }
+        Ok(waveform)
     }
 
     /// Rebuilds and rewrites the peak cache for a source file. Used when a
@@ -594,20 +599,7 @@ fn write_waveform_cache(
 }
 
 fn build_waveform(metadata: AudioMetadata, samples: &[f32]) -> CachedWaveform {
-    const WINDOW_FRAMES: usize = 1_024;
-    let window_samples = WINDOW_FRAMES * usize::from(metadata.channels);
-    let peaks = samples
-        .chunks(window_samples)
-        .map(|window| WaveformPeak {
-            minimum: window.iter().copied().fold(f32::INFINITY, f32::min),
-            maximum: window.iter().copied().fold(f32::NEG_INFINITY, f32::max),
-        })
-        .collect();
-    CachedWaveform {
-        metadata,
-        window_frames: WINDOW_FRAMES as u64,
-        peaks,
-    }
+    CachedWaveform::build(metadata, samples)
 }
 
 fn path_to_portable_string(path: &Path, error_path: &Path) -> Result<String, ProjectFileError> {

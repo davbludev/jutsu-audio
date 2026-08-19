@@ -47,7 +47,8 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
 - `crates/jutsu-audio-project` — save/load/migrate, WAV import, and the waveform peak cache.
   The cache lives at `<project dir>/.jutsu-audio-cache/waveforms/<fingerprint>.json`; reach it
   through `AssetManager::waveform_cache_path` / `load_waveform` / `rebuild_waveform` rather than
-  rebuilding the path.
+  rebuilding the path. Its shape and zoom levels are `src/waveform.rs`: `level_for` picks the
+  window to draw at, and `load_waveform` refuses a cache from an older format so it is rebuilt.
 - `crates/jutsu-audio-engine::mixdown` — the only place a project becomes audio. `mix_project`
   sums tracks/layers/clips with mute, solo, per-clip gain and pan, resampling sources onto the
   project rate. The GUI worker and the CLI export both call it; nothing else should sum.

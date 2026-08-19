@@ -636,7 +636,10 @@ impl TimelineView {
         // Source frames covered by one pixel of lane.
         let source_frames_per_pixel =
             f64::from(waveform.metadata.sample_rate) / f64::from(self.pixels_per_second);
-        let window = waveform.window_frames as f64;
+        // Zoomed out, read from a coarser level: one fold per column instead of
+        // thousands, which is what keeps a long timeline scrolling.
+        let (window_frames, peaks) = waveform.level_for(source_frames_per_pixel);
+        let window = window_frames as f64;
         let centre = wave_rect.center().y;
         let half_height = wave_rect.height() * 0.5;
         let stroke = Stroke::new(1.0_f32, color);
@@ -648,11 +651,11 @@ impl TimelineView {
                 clip.source_start_sample as f64 + pixels_in * source_frames_per_pixel;
             let from = (source_frame / window).floor().max(0.0) as usize;
             let to = ((source_frame + source_frames_per_pixel) / window).ceil() as usize;
-            let to = to.clamp(from + 1, waveform.peaks.len());
-            if from >= waveform.peaks.len() {
+            let to = to.clamp(from + 1, peaks.len());
+            if from >= peaks.len() {
                 break;
             }
-            let (minimum, maximum) = waveform.peaks[from..to]
+            let (minimum, maximum) = peaks[from..to]
                 .iter()
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), peak| {
                     (low.min(peak.minimum), high.max(peak.maximum))

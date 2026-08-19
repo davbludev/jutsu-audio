@@ -80,3 +80,26 @@ Parameters are checked against the registry before anything is applied. Exit cod
 `unknown_extension` (with the types this build does have), `unknown_parameter` (with the ones the
 extension declares) or `invalid_parameter` (wrong type, or a value the extension refuses, such as
 a waveform name it does not know). Nothing is written when a request is refused.
+
+## Procedural generation
+
+`list_extensions` includes every generator with its presets; `describe_generator` answers with one
+generator's full schema — parameter IDs, value types, defaults, `minimum`/`maximum`, and the
+presets it ships. Between them there is nothing a caller needs to read prose for.
+
+`preview_generator` renders a recipe without touching a project and reports `frame_count`, `peak`,
+`rms` and a `fingerprint` of the samples; pass `output` to write the preview as a float WAV. The
+fingerprint is the reproducibility check: the same generator, seed, length and parameters always
+give the same one.
+
+`run_generator` puts a recipe into a project as a generated asset plus the clip that plays it.
+Entity IDs are derived from the recipe, so:
+
+- `mode: "replace"` (the default) reruns a recipe over what it produced before, keeping the asset
+  ID so every clip already using it follows the new version;
+- `mode: "new"` with a `variant` number adds a variant beside the original, and the same variant
+  number always names the same entity.
+
+Generated audio is never stored in the project. The mix renders it from the asset's provenance —
+generator, algorithm version, seed, parameters — which is why two exports of one project are
+identical, and why a project can never disagree with its own recipe.

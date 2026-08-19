@@ -202,6 +202,13 @@ pub trait EffectFactory: Send + Sync {
 
 pub trait GeneratorFactory: Send + Sync {
     fn descriptor(&self) -> &ExtensionDescriptor;
+
+    /// Named parameter sets worth starting from. Empty is a fine answer; a
+    /// generator with one obvious sound does not need presets.
+    fn presets(&self) -> &[generators::GeneratorPreset] {
+        &[]
+    }
+
     fn instantiate(
         &self,
         parameters: &BTreeMap<String, ParameterValue>,
@@ -283,6 +290,16 @@ impl ExtensionRegistries {
 
     pub fn generator_type_ids(&self) -> impl Iterator<Item = &ExtensionTypeId> {
         self.generators.keys()
+    }
+
+    /// The presets a registered generator ships with.
+    pub fn generator_presets(
+        &self,
+        type_id: &ExtensionTypeId,
+    ) -> Option<&[generators::GeneratorPreset]> {
+        self.generators
+            .get(type_id)
+            .map(|factory| factory.presets())
     }
 
     pub fn instantiate_synth(

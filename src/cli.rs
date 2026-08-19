@@ -7,6 +7,7 @@ use jutsu_audio_engine::{
     ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
     mix_project,
 };
+use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, Clip, ClipId, ClipNote, Layer, LayerId, LoopRegion, Marker,
     MarkerId, ParameterValue, Project, Track, TrackId,
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli_session::{self, Applied};
-use crate::cli_synth;
+use crate::{cli_generator, cli_synth};
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -212,6 +213,51 @@ enum Request {
         clip_id: ClipId,
         notes: Vec<CliNote>,
     },
+    /// One generator's full schema: parameters, bounds and presets.
+    DescribeGenerator {
+        protocol_version: u32,
+        type_id: String,
+    },
+    /// Renders a recipe and reports what it sounds like, without touching a
+    /// project. Writes a WAV when `output` is given.
+    PreviewGenerator {
+        protocol_version: u32,
+        type_id: String,
+        seed: u64,
+        frame_count: u64,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+        #[serde(default)]
+        output: Option<PathBuf>,
+    },
+    /// Runs a recipe into a project: a generated asset and the clip that plays
+    /// it, with IDs derived from the recipe.
+    RunGenerator {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        layer_id: LayerId,
+        type_id: String,
+        seed: u64,
+        frame_count: u64,
+        #[serde(default)]
+        start_sample: u64,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+        /// `replace` reuses the IDs this recipe produced before, so every clip
+        /// already using the asset follows the new version. `new` adds a
+        /// variant beside it.
+        #[serde(default = "replace_by_default")]
+        mode: RegenerateMode,
+        /// Distinguishes one variant from the next under `new`, and keeps that
+        /// variant reproducible.
+        #[serde(default)]
+        variant: u64,
+    },
+}
+
+const fn replace_by_default() -> RegenerateMode {
+    RegenerateMode::Replace
 }
 
 /// A note as a caller writes it: frames from the clip's own start.
@@ -262,6 +308,9 @@ enum CliExportEncoding {
 const fn full_frame_count() -> u64 {
     u64::MAX
 }
+
+/// Generators render at this rate, so a preview WAV is written at it too.
+const PREVIEW_SAMPLE_RATE: u32 = 48_000;
 
 impl Request {
     const fn protocol_version(&self) -> u32 {
@@ -345,6 +394,15 @@ impl Request {
                 protocol_version, ..
             }
             | Self::SetClipNotes {
+                protocol_version, ..
+            }
+            | Self::DescribeGenerator {
+                protocol_version, ..
+            }
+            | Self::PreviewGenerator {
+                protocol_version, ..
+            }
+            | Self::RunGenerator {
                 protocol_version, ..
             } => *protocol_version,
             Self::ListExtensions { protocol_version } => *protocol_version,
@@ -868,6 +926,117 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             Ok(
                 json!({"type": "clip_notes_set", "clip_id": clip_id, "note_count": count, "revision": applied.revision, "delivery": applied.delivery}),
             )
+        }
+        Request::DescribeGenerator { type_id, .. } => {
+            let registries = crate::extensions::registries();
+            let parsed = ExtensionTypeId::new(type_id.clone())
+                .map_err(|error| (6, "invalid_parameter", error.message))?;
+            let descriptor = registries.generator_descriptor(&parsed).ok_or_else(|| {
+                let available: Vec<&str> = registries
+                    .generator_type_ids()
+                    .map(ExtensionTypeId::as_str)
+                    .collect();
+                (
+                    6,
+                    "unknown_extension",
+                    format!(
+                        "no generator '{type_id}' is registered; this build has {}",
+                        available.join(", ")
+                    ),
+                )
+            })?;
+            let presets = registries.generator_presets(&parsed).unwrap_or_default();
+            Ok(json!({
+                "type": "generator_described",
+                "generator": cli_generator::describe(descriptor, presets),
+            }))
+        }
+        Request::PreviewGenerator {
+            type_id,
+            seed,
+            frame_count,
+            parameters,
+            output,
+            ..
+        } => {
+            let recipe = cli_generator::recipe(type_id, 1, seed, frame_count, parameters);
+            let samples = cli_generator::render(crate::extensions::registries(), &recipe)?;
+            let mut result = cli_generator::summarise(&samples);
+            result["type"] = json!("generator_previewed");
+            result["seed"] = json!(seed);
+            if let Some(output) = output {
+                let snapshot =
+                    PlaybackSnapshot::new(PREVIEW_SAMPLE_RATE, 1, std::sync::Arc::from(samples))
+                        .map_err(|error| (3, "export_failed", error.message))?;
+                OfflineExporter::export_wav(
+                    std::sync::Arc::new(snapshot),
+                    &output,
+                    ExportRange::full(),
+                    ExportEncoding::Float32,
+                )
+                .map_err(|error| (3, "export_failed", error.message))?;
+                result["output"] = json!(output);
+            }
+            Ok(result)
+        }
+        Request::RunGenerator {
+            path,
+            track_id,
+            layer_id,
+            type_id,
+            seed,
+            frame_count,
+            start_sample,
+            parameters,
+            mode,
+            variant,
+            ..
+        } => {
+            let recipe = cli_generator::recipe(type_id, 1, seed, frame_count, parameters);
+            cli_generator::validate(crate::extensions::registries(), &recipe)?;
+            let (asset_id, clip_id) = cli_generator::identity(&recipe, mode, variant);
+
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let existing = project.assets.iter().any(|asset| asset.id == asset_id);
+            let asset = jutsu_audio_model::Asset {
+                id: asset_id,
+                name: recipe.generator_type.clone(),
+                source: recipe.asset_source(),
+            };
+            let clip = Clip {
+                id: clip_id,
+                asset_id,
+                start_sample,
+                source_start_sample: 0,
+                duration_samples: frame_count,
+                parameters: BTreeMap::new(),
+                notes: Vec::new(),
+            };
+
+            // Replacing means removing what this recipe produced before, in the
+            // same batch, so the project is never briefly without it.
+            let mut commands = Vec::new();
+            if existing {
+                commands.push(ProjectCommand::RemoveClip { clip_id });
+                commands.push(ProjectCommand::RemoveAsset { asset_id });
+            }
+            commands.push(ProjectCommand::AddAsset { asset });
+            commands.push(ProjectCommand::AddClip {
+                track_id,
+                layer_id,
+                clip,
+            });
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(json!({
+                "type": "generator_ran",
+                "asset_id": asset_id,
+                "clip_id": clip_id,
+                "seed": seed,
+                "mode": mode,
+                "replaced": existing,
+                "revision": applied.revision,
+                "delivery": applied.delivery,
+            }))
         }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;

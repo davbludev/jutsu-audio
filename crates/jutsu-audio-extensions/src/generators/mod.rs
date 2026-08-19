@@ -77,6 +77,10 @@ impl GeneratorFactory for SfxFactory {
         &self.descriptor
     }
 
+    fn presets(&self) -> &[GeneratorPreset] {
+        &self.presets
+    }
+
     fn instantiate(
         &self,
         parameters: &BTreeMap<String, ParameterValue>,

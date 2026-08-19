@@ -31,8 +31,11 @@ pub fn describe_all(registries: &ExtensionRegistries) -> Value {
             .collect::<Vec<_>>(),
         "generators": registries
             .generator_type_ids()
-            .filter_map(|type_id| registries.generator_descriptor(type_id))
-            .map(describe)
+            .filter_map(|type_id| {
+                let descriptor = registries.generator_descriptor(type_id)?;
+                let presets = registries.generator_presets(type_id).unwrap_or_default();
+                Some(crate::cli_generator::describe(descriptor, presets))
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -55,6 +58,8 @@ pub fn describe(descriptor: &ExtensionDescriptor) -> Value {
                 "default_value": parameter.default_value,
                 "introduced_in_state_version": parameter.introduced_in_state_version,
                 "automatable": parameter.automatable,
+                "minimum": parameter.minimum,
+                "maximum": parameter.maximum,
             }))
             .collect::<Vec<_>>(),
     })

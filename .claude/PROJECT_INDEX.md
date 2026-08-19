@@ -27,6 +27,8 @@ it has moved.
   answers external requests. Lives in `src/lib.rs` (not the binary) so
   `tests/session_workflows.rs` can stand up a real editor against a real socket.
 - `src/extensions.rs` — the one set of registries both surfaces share, built once on first use.
+- `src/cli_generator.rs` — generator discovery, recipe validation, preview rendering and the
+  derived-ID rules `run_generator` uses.
 - `src/cli_synth.rs` — registry-backed validation and discovery for the CLI; `src/synth_panel.rs`
   is the same idea for the inspector, building widgets from the descriptor.
 - `src/cli.rs` + `src/bin/jutsu-audio-cli.rs` — the machine surface. Reached through

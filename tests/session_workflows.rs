@@ -6,86 +6,18 @@
 //! seam between them — attach, conflict, replay, disconnect, crash, fallback —
 //! not the UI.
 
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+mod support;
 
-use jutsu_audio::cli;
-use jutsu_audio::session_host::SessionHost;
-use jutsu_audio_commands::{CommandHistory, ProjectCommandEngine};
-use jutsu_audio_model::Project;
-use jutsu_audio_project::ProjectStore;
+use std::net::TcpListener;
+use std::path::PathBuf;
+
 use jutsu_audio_session::{
     RequestPayload, ResponsePayload, SessionClient, SessionDescriptor, SessionErrorCode,
     SessionResponse,
 };
 use serde_json::{Value, json};
+use support::{Editor, call, clip_count, clips_on_disk, ok, write_test_wav};
 use tempfile::TempDir;
-
-/// A running editor: owns the project, answers the socket, and publishes what
-/// it currently holds so a test can look at it without stopping it.
-struct Editor {
-    stop: Arc<AtomicBool>,
-    state: Arc<Mutex<Project>>,
-    revision: Arc<Mutex<u64>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Editor {
-    fn open(path: &Path) -> Self {
-        let project = ProjectStore::open(path).expect("open").project;
-        let state = Arc::new(Mutex::new(project.clone()));
-        let revision = Arc::new(Mutex::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        let host = SessionHost::start(path, || {}).expect("host");
-
-        let thread = std::thread::spawn({
-            let state = Arc::clone(&state);
-            let revision = Arc::clone(&revision);
-            let stop = Arc::clone(&stop);
-            move || {
-                let mut engine = ProjectCommandEngine::new(project).expect("engine");
-                let mut history = CommandHistory::new();
-                while !stop.load(Ordering::Acquire) {
-                    if !host.poll(&mut engine, &mut history, false).is_empty() {
-                        *state.lock().expect("state") = engine.project().clone();
-                        *revision.lock().expect("revision") = engine.revision();
-                    }
-                    std::thread::yield_now();
-                }
-                // Drain anything that arrived while stopping, so a client
-                // waiting on an answer is never left hanging.
-                let _ = host.poll(&mut engine, &mut history, false);
-            }
-        });
-
-        Self {
-            stop,
-            state,
-            revision,
-            thread: Some(thread),
-        }
-    }
-
-    fn project(&self) -> Project {
-        self.state.lock().expect("state").clone()
-    }
-
-    fn revision(&self) -> u64 {
-        *self.revision.lock().expect("revision")
-    }
-}
-
-impl Drop for Editor {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
 
 struct Fixture {
     _directory: TempDir,
@@ -138,30 +70,6 @@ impl Fixture {
             "duration_samples": 480
         })
     }
-}
-
-fn call(request: Value) -> (i32, Value) {
-    cli::execute_json(&request.to_string())
-}
-
-/// The `result` of a request that must succeed.
-fn ok(request: Value) -> Value {
-    let (code, response) = call(request);
-    assert_eq!(code, 0, "request failed: {response}");
-    response["result"].clone()
-}
-
-fn clip_count(project: &Project) -> usize {
-    project
-        .tracks
-        .iter()
-        .flat_map(|track| &track.layers)
-        .map(|layer| layer.clips.len())
-        .sum()
-}
-
-fn clips_on_disk(path: &Path) -> usize {
-    clip_count(&ProjectStore::open(path).expect("open").project)
 }
 
 #[test]
@@ -230,7 +138,7 @@ fn rapid_edits_from_two_clients_all_land_without_losing_updates() {
 fn a_stale_expected_revision_is_refused_and_leaves_the_project_alone() {
     let fixture = fixture();
     let editor = Editor::open(&fixture.path);
-    ok(fixture.add_clip_request(0));
+    let _ = ok(fixture.add_clip_request(0));
 
     let mut client = SessionClient::attach(&fixture.path)
         .expect("attach")
@@ -380,18 +288,4 @@ fn a_replayed_request_id_is_answered_once_by_the_editor() {
     );
     assert_eq!(editor.revision(), 1, "the batch applied exactly once");
     assert_eq!(editor.project().metadata.name, "Once");
-}
-
-fn write_test_wav(path: &Path) {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 48_000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(path, spec).expect("wav");
-    for frame in 0..480_i32 {
-        writer.write_sample((frame * 16) as i16).expect("sample");
-    }
-    writer.finalize().expect("finalize");
 }

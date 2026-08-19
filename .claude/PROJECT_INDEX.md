@@ -70,6 +70,14 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   `docs/design/jutsu-audio-session-protocol-v1.md`.
 - `crates/jutsu-audio-extensions` — compile-time synth/effect/generator registries.
 
+## Tests worth knowing about
+
+- `tests/sfx_workflow.rs` — the end-to-end SFX scenario, documented in
+  `docs/workflows/first-sfx-edit.md`. Runs without an audio device.
+- `tests/session_workflows.rs` — concurrent editor/CLI behaviour over a real socket.
+- `tests/support/mod.rs` — the shared harness both use: a live `Editor`, the in-process CLI, and
+  a deterministic test WAV.
+
 ## Conventions worth knowing before editing
 
 - Clip `start_sample` and `duration_samples` are **project** frames; `source_start_sample` is in

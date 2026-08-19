@@ -45,6 +45,9 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   The cache lives at `<project dir>/.jutsu-audio-cache/waveforms/<fingerprint>.json`; reach it
   through `AssetManager::waveform_cache_path` / `load_waveform` / `rebuild_waveform` rather than
   rebuilding the path.
+- `crates/jutsu-audio-engine::mixdown` — the only place a project becomes audio. `mix_project`
+  sums tracks/layers/clips with mute, solo, per-clip gain and pan, resampling sources onto the
+  project rate. The GUI worker and the CLI export both call it; nothing else should sum.
 - `crates/jutsu-audio-engine` — transport, snapshot exchange, `PlaybackRenderer`,
   `OfflineExporter`. The renderer is built by `SystemAudioOutput::open_default` from the device's
   own format and converts the snapshot onto it; when the formats already match it takes a
@@ -68,6 +71,7 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
 - Clip `start_sample` and `duration_samples` are **project** frames; `source_start_sample` is in
   the source file's own frames. The project rate is inferred from the first managed asset
   (`timeline::project_sample_rate`) — there is no rate field in the schema yet.
-- Track mute, solo and gain are intentionally absent from the UI: no command exists to change
-  them and the render path would ignore them.
+- Track mute and solo live in `Track::parameters` under `"mute"` / `"solo"`, clip gain and pan in
+  `Clip::parameters` under `"gain_db"` / `"pan"`. The keys are named in
+  `jutsu-audio-engine::mixdown`; read them through its helpers rather than by hand.
 - `cargo quality` is the gate; the four steps are listed in `xtask/src/lib.rs:quality_steps`.

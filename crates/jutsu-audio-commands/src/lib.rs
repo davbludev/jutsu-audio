@@ -1,7 +1,8 @@
 use std::fmt;
 
 use jutsu_audio_model::{
-    Asset, AssetId, Clip, ClipId, LayerId, Project, TrackId, ValidationDiagnostic,
+    Asset, AssetId, Clip, ClipId, Layer, LayerId, ParameterValue, Project, Track, TrackId,
+    ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -75,6 +76,36 @@ pub enum ProjectCommand {
     RemoveClip {
         clip_id: ClipId,
     },
+    /// Appends a track. Order is the project's own order, which is also the
+    /// order the mix sums in.
+    AddTrack {
+        track: Track,
+    },
+    RemoveTrack {
+        track_id: TrackId,
+    },
+    /// Appends a layer to a track. Layers are lanes within one track.
+    AddLayer {
+        track_id: TrackId,
+        layer: Layer,
+    },
+    RemoveLayer {
+        layer_id: LayerId,
+    },
+    SetTrackMute {
+        track_id: TrackId,
+        muted: bool,
+    },
+    /// Solo wins over mute: with any track soloed, only soloed tracks play.
+    SetTrackSolo {
+        track_id: TrackId,
+        soloed: bool,
+    },
+    /// Stereo position, `-1.0` hard left to `1.0` hard right.
+    SetClipPan {
+        clip_id: ClipId,
+        pan: f64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -91,6 +122,8 @@ pub enum EntityKind {
     Project,
     Asset,
     Clip,
+    Track,
+    Layer,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -372,6 +405,117 @@ pub(crate) fn apply_command(
                 entity_id: clip_id.to_string(),
             }
         }
+        ProjectCommand::AddTrack { track } => {
+            project.tracks.push(track.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Track,
+                entity_id: track.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveTrack { track_id } => {
+            let index = project
+                .tracks
+                .iter()
+                .position(|track| track.id == *track_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("track {track_id} does not exist"),
+                    )
+                })?;
+            project.tracks.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::AddLayer { track_id, layer } => {
+            let track = find_track(project, *track_id, command_index)?;
+            track.layers.push(layer.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Layer,
+                entity_id: layer.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveLayer { layer_id } => {
+            let layers = project
+                .tracks
+                .iter_mut()
+                .map(|track| &mut track.layers)
+                .find(|layers| layers.iter().any(|layer| layer.id == *layer_id))
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("layer {layer_id} does not exist"),
+                    )
+                })?;
+            let index = layers
+                .iter()
+                .position(|layer| layer.id == *layer_id)
+                .expect("found");
+            layers.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Layer,
+                entity_id: layer_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTrackMute { track_id, muted } => {
+            let track = find_track(project, *track_id, command_index)?;
+            track
+                .parameters
+                .insert("mute".into(), ParameterValue::Bool(*muted));
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTrackSolo { track_id, soloed } => {
+            let track = find_track(project, *track_id, command_index)?;
+            track
+                .parameters
+                .insert("solo".into(), ParameterValue::Bool(*soloed));
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::SetClipPan { clip_id, pan } => {
+            let clip = project
+                .tracks
+                .iter_mut()
+                .flat_map(|track| &mut track.layers)
+                .flat_map(|layer| &mut layer.clips)
+                .find(|clip| clip.id == *clip_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("clip {clip_id} does not exist"),
+                    )
+                })?;
+            clip.parameters
+                .insert("pan".into(), ParameterValue::Float(pan.clamp(-1.0, 1.0)));
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
+            }
+        }
         ProjectCommand::RemoveClip { clip_id } => {
             let clips = project
                 .tracks
@@ -401,4 +545,23 @@ pub(crate) fn apply_command(
     };
 
     Ok(change)
+}
+
+/// The track a command names, or a structured "does not exist".
+fn find_track(
+    project: &mut Project,
+    track_id: TrackId,
+    command_index: usize,
+) -> Result<&mut Track, CommandError> {
+    project
+        .tracks
+        .iter_mut()
+        .find(|track| track.id == track_id)
+        .ok_or_else(|| {
+            CommandError::at_command(
+                CommandErrorCode::EntityNotFound,
+                command_index,
+                format!("track {track_id} does not exist"),
+            )
+        })
 }

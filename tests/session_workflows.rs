@@ -181,7 +181,11 @@ fn the_cli_attaches_to_a_live_editor_and_leaves_the_file_to_it() {
     assert_eq!(added["delivery"], "session");
     assert_eq!(added["revision"], 1);
 
-    assert_eq!(clip_count(&editor.project()), 1, "the editor holds the clip");
+    assert_eq!(
+        clip_count(&editor.project()),
+        1,
+        "the editor holds the clip"
+    );
     assert_eq!(
         clips_on_disk(&fixture.path),
         0,

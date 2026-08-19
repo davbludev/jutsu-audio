@@ -35,7 +35,7 @@ use timeline::{
     TimelineAction, TimelineContext, TimelineView, Tool, WaveformState, clip_gain_db,
     has_mixed_sample_rates, project_duration_frames, project_sample_rate,
 };
-use worker::{Job, JobResult, MixClip, MixRequest, Worker, resolve_asset_path};
+use worker::{Job, JobResult, MixRequest, Worker, resolve_asset_path};
 
 /// How long editing has to settle before the project is written to disk.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
@@ -318,6 +318,61 @@ impl JutsuAudioApp {
                 self.status = Status::error(format!("Redo failed: {}", error.message));
             }
             None => self.status = Status::info("Nothing to redo"),
+        }
+    }
+
+    /// A track flag as the mix reads it. Absent counts as off.
+    fn track_flag(&self, track_id: TrackId, key: &str) -> bool {
+        self.project()
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .is_some_and(|track| timeline::track_flag(track, key))
+    }
+
+    /// Appends a track with one empty layer, ready to drop a sample onto.
+    fn add_track(&mut self) {
+        let track = jutsu_audio_model::Track {
+            id: TrackId::new(),
+            name: format!("Track {}", self.project().tracks.len() + 1),
+            output_bus_id: self.project().master_bus_id,
+            parameters: std::collections::BTreeMap::new(),
+            layers: vec![jutsu_audio_model::Layer {
+                id: LayerId::new(),
+                name: "Layer 1".into(),
+                clips: Vec::new(),
+            }],
+        };
+        if self.apply(vec![ProjectCommand::AddTrack { track }]) {
+            self.status = Status::info("Track added");
+        }
+    }
+
+    /// Appends a lane to the track holding the selection, or to the last track
+    /// when nothing is selected.
+    fn add_layer(&mut self) {
+        let Some(track_id) = self
+            .selected_clip
+            .and_then(|clip_id| self.lane_of(clip_id))
+            .map(|(track_id, _)| track_id)
+            .or_else(|| self.project().tracks.last().map(|track| track.id))
+        else {
+            self.status = Status::error("Add a track first");
+            return;
+        };
+        let count = self
+            .project()
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map_or(0, |track| track.layers.len());
+        let layer = jutsu_audio_model::Layer {
+            id: LayerId::new(),
+            name: format!("Layer {}", count + 1),
+            clips: Vec::new(),
+        };
+        if self.apply(vec![ProjectCommand::AddLayer { track_id, layer }]) {
+            self.status = Status::info("Layer added");
         }
     }
 
@@ -645,34 +700,13 @@ impl JutsuAudioApp {
             return;
         };
         let sample_rate = self.sample_rate();
-        let clips: Vec<MixClip> = self
-            .project()
-            .tracks
-            .iter()
-            .flat_map(|track| &track.layers)
-            .flat_map(|layer| &layer.clips)
-            .filter_map(|clip| {
-                let asset = self
-                    .project()
-                    .assets
-                    .iter()
-                    .find(|asset| asset.id == clip.asset_id)?;
-                Some(MixClip {
-                    source: resolve_asset_path(&project_path, &asset.source)?,
-                    start_frame: clip.start_sample,
-                    source_start_frame: clip.source_start_sample,
-                    duration_frames: clip.duration_samples,
-                    gain_db: clip_gain_db(clip),
-                })
-            })
-            .collect();
-
         self.next_mix_id = self.next_mix_id.wrapping_add(1);
         let id = self.next_mix_id;
         if self.send(Job::Mixdown(MixRequest {
             id,
             sample_rate,
-            clips,
+            project: Box::new(self.project().clone()),
+            project_path,
         })) {
             self.active_mix = Some(id);
         }
@@ -1793,6 +1827,20 @@ impl JutsuAudioApp {
                             self.timeline.snap = !self.timeline.snap;
                         }
 
+                        ui.add_space(10.0);
+                        if theme::tool_button(ui, "+ Track", false)
+                            .on_hover_text("Add a track to the timeline")
+                            .clicked()
+                        {
+                            self.add_track();
+                        }
+                        if theme::tool_button(ui, "+ Lane", false)
+                            .on_hover_text("Add a lane to the selected track")
+                            .clicked()
+                        {
+                            self.add_layer();
+                        }
+
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(10.0);
                             if theme::tool_button(ui, "+", false).clicked() {
@@ -1882,6 +1930,20 @@ impl JutsuAudioApp {
                 self.edit = None;
             }
             TimelineAction::Seek(frame) => self.transport.seek(frame),
+            TimelineAction::ToggleTrackMute(track_id) => {
+                let muted = self.track_flag(track_id, "mute");
+                self.apply(vec![ProjectCommand::SetTrackMute {
+                    track_id,
+                    muted: !muted,
+                }]);
+            }
+            TimelineAction::ToggleTrackSolo(track_id) => {
+                let soloed = self.track_flag(track_id, "solo");
+                self.apply(vec![ProjectCommand::SetTrackSolo {
+                    track_id,
+                    soloed: !soloed,
+                }]);
+            }
             TimelineAction::DropAsset {
                 asset_id,
                 track_id,

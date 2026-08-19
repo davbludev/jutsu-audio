@@ -26,3 +26,14 @@ The route is never chosen by the caller: writing the file behind an editor that 
 `session_status` reports `attached`, plus the owner's project path, name, revision and unsaved flag when one is live. `transport_request` needs a `path` and is delivered to the live editor; with no editor running it is acknowledged with `delivery: "offline"` and dropped, because nothing is playing.
 
 The protocol behind this is `docs/design/jutsu-audio-session-protocol-v1.md`.
+
+## Tracks, layers and the mix
+
+`add_track` appends a track with one empty layer and returns both IDs; `add_layer` appends a lane
+to a named track. `set_track_mute`, `set_track_solo` and `set_clip_pan` change how a project
+sums: solo wins over mute, pan runs `-1.0` (hard left) to `1.0` (hard right), and centre is unity
+in both channels.
+
+These are the same rules playback uses. Every surface — GUI playback, GUI export, `export_wav` —
+mixes through `jutsu-audio-engine`'s `mix_project`, so a muted track is silent everywhere or
+nowhere.

@@ -107,6 +107,132 @@ fn session_status_reports_that_no_editor_owns_the_project() {
     assert!(status["result"]["session"].is_null());
 }
 
+#[test]
+fn tracks_layers_mute_and_solo_are_editable_from_the_machine_surface() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }));
+
+    let (code, added) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_track",
+        "path": path,
+        "name": "Layers"
+    }));
+    assert_eq!(code, 0, "{added}");
+    assert_eq!(added["result"]["type"], "track_added");
+    let track_id = added["result"]["track_id"].clone();
+
+    let (code, layered) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_layer",
+        "path": path,
+        "track_id": track_id,
+        "name": "Tail"
+    }));
+    assert_eq!(code, 0, "{layered}");
+    assert_eq!(layered["result"]["type"], "layer_added");
+
+    let (code, muted) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_track_mute",
+        "path": path,
+        "track_id": track_id,
+        "muted": true
+    }));
+    assert_eq!(code, 0, "{muted}");
+    assert_eq!(muted["result"]["muted"], true);
+
+    let (code, inspected) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "inspect_project",
+        "path": path
+    }));
+    assert_eq!(code, 0);
+    let tracks = inspected["result"]["project"]["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 2, "the project started with one track");
+    let added = tracks.iter().find(|track| track["id"] == track_id).unwrap();
+    assert_eq!(added["layers"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        added["parameters"]["mute"],
+        json!({"type": "bool", "value": true})
+    );
+}
+
+#[test]
+fn muting_a_track_silences_it_in_an_exported_wav() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let source = directory.path().join("blip.wav");
+    let output = directory.path().join("mix.wav");
+    write_test_wav(&source);
+
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }))
+    .1;
+    let imported = invoke(json!({
+        "protocol_version": 1,
+        "operation": "import_sample",
+        "path": path,
+        "source": source
+    }))
+    .1;
+    let track_id = created["result"]["track_id"].clone();
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_clip",
+        "path": path,
+        "asset_id": imported["result"]["asset_id"],
+        "track_id": track_id,
+        "layer_id": created["result"]["layer_id"],
+        "start_sample": 0,
+        "source_start_sample": 0,
+        "duration_samples": 480
+    }));
+
+    assert!(peak_of_export(&path, &output) > 0.0, "the clip is audible");
+
+    let (code, muted) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_track_mute",
+        "path": path,
+        "track_id": track_id,
+        "muted": true
+    }));
+    assert_eq!(code, 0, "{muted}");
+    assert_eq!(
+        peak_of_export(&path, &output),
+        0.0,
+        "a muted track must be silent in the export, as it is in playback"
+    );
+}
+
+/// Exports the project and returns the loudest absolute sample in the file.
+fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
+    let (code, exported) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "export_wav",
+        "path": path,
+        "output": output,
+        "encoding": "float32"
+    }));
+    assert_eq!(code, 0, "{exported}");
+    let mut reader = hound::WavReader::open(output).unwrap();
+    reader
+        .samples::<f32>()
+        .map(|sample| sample.unwrap().abs())
+        .fold(0.0_f32, f32::max)
+}
+
 fn write_test_wav(path: &std::path::Path) {
     let spec = hound::WavSpec {
         channels: 1,

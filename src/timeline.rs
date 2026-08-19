@@ -60,6 +60,8 @@ pub enum TimelineAction {
         start_sample: u64,
     },
     Seek(u64),
+    ToggleTrackMute(TrackId),
+    ToggleTrackSolo(TrackId),
     DropAsset {
         asset_id: AssetId,
         track_id: TrackId,
@@ -225,6 +227,7 @@ impl TimelineView {
         actions.extend(self.clips(ui, lanes_rect, content_left, context));
         self.paint_playhead(&painter, ruler_rect, lanes_rect, content_left, context);
         self.paint_headers(&painter, header_rect, context);
+        actions.extend(self.header_controls(ui, header_rect, context));
 
         if let Some(action) = self.handle_ruler_seek(ui, ruler_rect, content_left, context) {
             actions.push(action);
@@ -748,6 +751,55 @@ impl TimelineView {
         }
     }
 
+    /// The top of the first lane of each track, paired with the track. Mute and
+    /// solo belong to the track, so their chips sit on that first row only.
+    fn track_rows(&self, header_rect: Rect, context: &TimelineContext<'_>) -> Vec<(TrackId, f32)> {
+        let mut lane = 0;
+        let mut rows = Vec::new();
+        for track in &context.project.tracks {
+            let top = header_rect.top() + lane as f32 * LANE_HEIGHT - self.scroll_y;
+            rows.push((track.id, top));
+            lane += track.layers.len().max(1);
+        }
+        rows
+    }
+
+    /// Where the mute and solo chips sit on a track's first lane.
+    fn chip_rects(header_rect: Rect, top: f32) -> [Rect; 2] {
+        let y = top + LANE_HEIGHT - 24.0;
+        let mute = Rect::from_min_size(pos2(header_rect.left() + 10.0, y), Vec2::new(22.0, 16.0));
+        [mute, mute.translate(Vec2::new(26.0, 0.0))]
+    }
+
+    /// Mute and solo. Painted by [`Self::paint_headers`]; this is the half that
+    /// listens, so the timeline still reports actions rather than mutating.
+    fn header_controls(
+        &self,
+        ui: &mut egui::Ui,
+        header_rect: Rect,
+        context: &TimelineContext<'_>,
+    ) -> Vec<TimelineAction> {
+        let mut actions = Vec::new();
+        for (track_id, top) in self.track_rows(header_rect, context) {
+            if top > header_rect.bottom() || top + LANE_HEIGHT < header_rect.top() {
+                continue;
+            }
+            let [mute, solo] = Self::chip_rects(header_rect, top);
+            let mute = ui.interact(mute, egui::Id::new(("mute", track_id)), Sense::click());
+            if mute.on_hover_text("Mute this track").clicked() {
+                actions.push(TimelineAction::ToggleTrackMute(track_id));
+            }
+            let solo = ui.interact(solo, egui::Id::new(("solo", track_id)), Sense::click());
+            if solo
+                .on_hover_text("Solo this track — solo wins over mute")
+                .clicked()
+            {
+                actions.push(TimelineAction::ToggleTrackSolo(track_id));
+            }
+        }
+        actions
+    }
+
     fn paint_headers(
         &self,
         painter: &egui::Painter,
@@ -806,6 +858,23 @@ impl TimelineView {
                     theme::FAINT,
                 );
             }
+        }
+
+        for (track_id, top) in self.track_rows(header_rect, context) {
+            let Some(track) = context
+                .project
+                .tracks
+                .iter()
+                .find(|track| track.id == track_id)
+            else {
+                continue;
+            };
+            if top > header_rect.bottom() || top + LANE_HEIGHT < header_rect.top() {
+                continue;
+            }
+            let [mute, solo] = Self::chip_rects(header_rect, top);
+            paint_chip(&painter, mute, "M", track_flag(track, "mute"));
+            paint_chip(&painter, solo, "S", track_flag(track, "solo"));
         }
     }
 
@@ -990,6 +1059,38 @@ pub fn clip_gain_db(clip: &Clip) -> f64 {
         Some(ParameterValue::Float(value)) => *value,
         _ => 0.0,
     }
+}
+
+/// One header chip: filled while the flag is on, outlined while it is off, so
+/// state is readable without hovering.
+fn paint_chip(painter: &egui::Painter, rect: Rect, label: &str, on: bool) {
+    painter.rect_filled(
+        rect,
+        theme::RADIUS,
+        if on { theme::SIGNAL } else { theme::RAISED },
+    );
+    painter.rect_stroke(
+        rect,
+        theme::RADIUS,
+        Stroke::new(1.0_f32, theme::RULE),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        theme::mono(9.5),
+        if on { theme::BG } else { theme::DIM },
+    );
+}
+
+/// A track flag as the mix reads it: absent counts as off.
+#[must_use]
+pub fn track_flag(track: &jutsu_audio_model::Track, key: &str) -> bool {
+    matches!(
+        track.parameters.get(key),
+        Some(jutsu_audio_model::ParameterValue::Bool(true))
+    )
 }
 
 #[cfg(test)]

@@ -12,28 +12,23 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use eframe::egui;
-use jutsu_audio_engine::{ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot};
+use jutsu_audio_engine::{
+    ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot, SourceAudio, mix_project,
+};
 use jutsu_audio_model::{AssetId, AudioAssetSource, Project};
 use jutsu_audio_project::{
     AssetManager, AudioMetadata, CachedWaveform, ImportMode, ImportStatus, ProjectStore, autosave,
 };
 
-/// One clip flattened into everything the mixdown needs, so the worker never
-/// has to reach back into the project.
-#[derive(Clone, Debug)]
-pub struct MixClip {
-    pub source: PathBuf,
-    pub start_frame: u64,
-    pub source_start_frame: u64,
-    pub duration_frames: u64,
-    pub gain_db: f64,
-}
-
+/// One request to turn the project into audio. The whole project travels, so
+/// the summing rules live in one place — `jutsu-audio-engine` — rather than
+/// being re-derived here and again in the CLI.
 #[derive(Clone, Debug)]
 pub struct MixRequest {
     pub id: u64,
     pub sample_rate: u32,
-    pub clips: Vec<MixClip>,
+    pub project: Box<Project>,
+    pub project_path: PathBuf,
 }
 
 pub enum Job {
@@ -230,83 +225,43 @@ fn open(path: PathBuf) -> Result<OpenOutcome, String> {
 
 // ─── mixdown ────────────────────────────────────────────────────────────────
 
-/// Sums every clip into one interleaved stereo buffer at the project rate.
-/// This is what Play and Export both consume, so the two cannot disagree.
+/// Renders the project through the shared mixdown, feeding it decoded sources
+/// from the cache. Play and Export both consume the result, so the two cannot
+/// disagree — and neither can the CLI, which calls the same function.
 fn mixdown(request: MixRequest, cache: &mut DecodeCache) -> JobResult {
-    const CHANNELS: usize = 2;
+    let MixRequest {
+        id,
+        sample_rate,
+        project,
+        project_path,
+    } = request;
 
-    let total_frames = request
-        .clips
-        .iter()
-        .map(|clip| clip.start_frame.saturating_add(clip.duration_frames))
-        .max()
-        .unwrap_or(0);
-    if total_frames == 0 {
-        return JobResult::MixdownEmpty { id: request.id };
-    }
-    let Ok(total_frames) = usize::try_from(total_frames) else {
-        return JobResult::Mixdown {
-            id: request.id,
-            result: Err("timeline is longer than this machine can render".into()),
-        };
-    };
+    let mixed = mix_project(&project, sample_rate, |asset_id| {
+        let asset = project
+            .assets
+            .iter()
+            .find(|asset| asset.id == asset_id)
+            .ok_or_else(|| format!("asset {asset_id} is missing from the project"))?;
+        let path = resolve_asset_path(&project_path, &asset.source)
+            .ok_or_else(|| format!("asset {} has no file to read", asset.name))?;
+        let (metadata, samples) = cache.get(&path)?;
+        Ok(SourceAudio {
+            sample_rate: metadata.sample_rate,
+            channels: metadata.channels,
+            samples,
+        })
+    });
 
-    let mut mix = vec![0.0_f32; total_frames * CHANNELS];
-    for clip in &request.clips {
-        let (metadata, samples) = match cache.get(&clip.source) {
-            Ok(entry) => entry,
-            Err(error) => {
-                return JobResult::Mixdown {
-                    id: request.id,
-                    result: Err(error),
-                };
-            }
-        };
-        let source_channels = usize::from(metadata.channels);
-        if source_channels == 0 || samples.is_empty() {
-            continue;
-        }
-        let source_frames = samples.len() / source_channels;
-        // How far the read head moves through the source per project frame.
-        let step = f64::from(metadata.sample_rate) / f64::from(request.sample_rate.max(1));
-        let gain = 10_f32.powf(clip.gain_db as f32 / 20.0);
-
-        for offset in 0..clip.duration_frames {
-            let Ok(destination) = usize::try_from(clip.start_frame + offset) else {
-                break;
-            };
-            if destination >= total_frames {
-                break;
-            }
-            let read = clip.source_start_frame as f64 + offset as f64 * step;
-            let index = read.floor();
-            if index < 0.0 {
-                continue;
-            }
-            let index = index as usize;
-            if index >= source_frames {
-                break;
-            }
-            let next = (index + 1).min(source_frames - 1);
-            let blend = (read - read.floor()) as f32;
-            let base = index * source_channels;
-            let next_base = next * source_channels;
-
-            for channel in 0..CHANNELS {
-                let source = channel % source_channels;
-                let current = samples[base + source];
-                let upcoming = samples[next_base + source];
-                mix[destination * CHANNELS + channel] +=
-                    (current + (upcoming - current) * blend) * gain;
-            }
-        }
-    }
-
-    JobResult::Mixdown {
-        id: request.id,
-        result: PlaybackSnapshot::new(request.sample_rate, CHANNELS as u16, Arc::from(mix))
-            .map(Arc::new)
-            .map_err(|error| error.message),
+    match mixed {
+        Ok(Some(snapshot)) => JobResult::Mixdown {
+            id,
+            result: Ok(Arc::new(snapshot)),
+        },
+        Ok(None) => JobResult::MixdownEmpty { id },
+        Err(error) => JobResult::Mixdown {
+            id,
+            result: Err(error.message),
+        },
     }
 }
 
@@ -481,36 +436,61 @@ mod tests {
         writer.finalize().unwrap();
     }
 
-    fn render(request: MixRequest) -> Vec<f32> {
-        let mut cache = DecodeCache::default();
-        match mixdown(request, &mut cache) {
-            JobResult::Mixdown { result, .. } => result.unwrap().samples().to_vec(),
-            JobResult::MixdownEmpty { .. } => Vec::new(),
-            _ => panic!("mixdown returns a mixdown result"),
-        }
+    /// A one-clip project pointing at `source`, which is what the mixdown job
+    /// is handed in the running editor.
+    fn project_with_clip(project_path: &Path, source: &Path) -> Project {
+        let mut project = ProjectStore::new_project("Mix");
+        let asset = jutsu_audio_model::Asset {
+            id: AssetId::new(),
+            name: "Tone".into(),
+            source: AudioAssetSource::File {
+                path: pathdiff(project_path, source),
+            },
+        };
+        let clip = jutsu_audio_model::Clip {
+            id: jutsu_audio_model::ClipId::new(),
+            asset_id: asset.id,
+            start_sample: 2,
+            source_start_sample: 0,
+            duration_samples: 4,
+            parameters: std::collections::BTreeMap::new(),
+        };
+        project.assets.push(asset);
+        project.tracks[0].layers[0].clips.push(clip);
+        project
+    }
+
+    /// Asset paths are stored relative to the project file.
+    fn pathdiff(project_path: &Path, source: &Path) -> String {
+        source
+            .strip_prefix(project_path.parent().unwrap())
+            .unwrap()
+            .display()
+            .to_string()
     }
 
     #[test]
-    fn a_clip_lands_at_its_start_frame_and_fans_out_to_stereo() {
+    fn a_mix_job_decodes_through_the_cache_and_lands_the_clip_at_its_start_frame() {
         let directory = tempfile::tempdir().unwrap();
+        let project_path = directory.path().join("mix.jutsu-audio.json");
         let source = directory.path().join("tone.wav");
         write_mono_wav(&source, 48_000, &[1.0, 0.5, -0.5, -1.0]);
 
-        let mix = render(MixRequest {
-            id: 1,
-            sample_rate: 48_000,
-            clips: vec![MixClip {
-                source,
-                start_frame: 2,
-                source_start_frame: 0,
-                duration_frames: 4,
-                gain_db: 0.0,
-            }],
-        });
-
-        // Two silent stereo frames, then the source in both channels.
+        let mut cache = DecodeCache::default();
+        let result = mixdown(
+            MixRequest {
+                id: 1,
+                sample_rate: 48_000,
+                project: Box::new(project_with_clip(&project_path, &source)),
+                project_path,
+            },
+            &mut cache,
+        );
+        let JobResult::Mixdown { result, .. } = result else {
+            panic!("a project with a clip mixes to audio");
+        };
         assert_eq!(
-            mix,
+            result.unwrap().samples().to_vec(),
             vec![
                 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.5, -0.5, -0.5, -1.0, -1.0
             ]
@@ -518,63 +498,25 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_clips_sum_and_gain_is_applied_per_clip() {
+    fn a_missing_source_is_reported_rather_than_rendered_as_silence() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("tone.wav");
-        write_mono_wav(&source, 48_000, &[1.0, 1.0]);
+        let project_path = directory.path().join("mix.jutsu-audio.json");
+        let source = directory.path().join("never-written.wav");
 
-        let quiet = MixClip {
-            source: source.clone(),
-            start_frame: 0,
-            source_start_frame: 0,
-            duration_frames: 2,
-            // -6.0206 dB is exactly half amplitude.
-            gain_db: -6.020_6,
+        let mut cache = DecodeCache::default();
+        let result = mixdown(
+            MixRequest {
+                id: 1,
+                sample_rate: 48_000,
+                project: Box::new(project_with_clip(&project_path, &source)),
+                project_path,
+            },
+            &mut cache,
+        );
+        let JobResult::Mixdown { result, .. } = result else {
+            panic!("a broken source is a mixdown failure, not an empty timeline");
         };
-        let mix = render(MixRequest {
-            id: 1,
-            sample_rate: 48_000,
-            clips: vec![
-                quiet.clone(),
-                MixClip {
-                    start_frame: 1,
-                    ..quiet
-                },
-            ],
-        });
-
-        assert_eq!(mix.len(), 6);
-        for (index, expected) in [0.5, 0.5, 1.0, 1.0, 0.5, 0.5].into_iter().enumerate() {
-            assert!(
-                (mix[index] - expected).abs() < 1e-4,
-                "sample {index}: expected {expected}, got {}",
-                mix[index]
-            );
-        }
-    }
-
-    #[test]
-    fn material_at_another_rate_is_resampled_onto_the_project_rate() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("half-rate.wav");
-        // 24 kHz material in a 48 kHz project plays back over twice as many frames.
-        write_mono_wav(&source, 24_000, &[0.0, 1.0]);
-
-        let mix = render(MixRequest {
-            id: 1,
-            sample_rate: 48_000,
-            clips: vec![MixClip {
-                source,
-                start_frame: 0,
-                source_start_frame: 0,
-                duration_frames: 3,
-                gain_db: 0.0,
-            }],
-        });
-
-        // Left channel only; the right mirrors it.
-        let left: Vec<f32> = mix.iter().step_by(2).copied().collect();
-        assert_eq!(left, vec![0.0, 0.5, 1.0]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -585,7 +527,8 @@ mod tests {
                 MixRequest {
                     id: 9,
                     sample_rate: 48_000,
-                    clips: Vec::new(),
+                    project: Box::new(ProjectStore::new_project("Empty")),
+                    project_path: PathBuf::from("empty.jutsu-audio.json"),
                 },
                 &mut cache,
             ),

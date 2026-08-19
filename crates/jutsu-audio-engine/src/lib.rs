@@ -7,6 +7,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jutsu_audio_extensions::ExtensionTypeId;
 use jutsu_audio_model::{AssetId, BusId, ClipId, ParameterValue, ProjectId};
 
+pub mod mixdown;
+
+pub use mixdown::{MIX_CHANNELS, MixError, MixErrorCode, SourceAudio, mix_project};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum TransportState {

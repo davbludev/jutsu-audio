@@ -10,7 +10,7 @@
 //! order the engine committed them, so undo always reverses the last thing that
 //! happened to the project regardless of who did it.
 
-use jutsu_audio_model::{Clip, ParameterValue, Project};
+use jutsu_audio_model::{Clip, ParameterValue, Project, Track, TrackId};
 
 use crate::{
     COMMAND_PROTOCOL_VERSION, CommandEnvelope, CommandError, CommandErrorCode, CommandId,
@@ -189,6 +189,61 @@ fn invert_command(
                 clip: clip.clone(),
             }
         }
+        ProjectCommand::AddTrack { track } => ProjectCommand::RemoveTrack { track_id: track.id },
+        ProjectCommand::RemoveTrack { track_id } => {
+            let track = find_track(project, *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::AddTrack {
+                track: track.clone(),
+            }
+        }
+        ProjectCommand::AddLayer { layer, .. } => {
+            ProjectCommand::RemoveLayer { layer_id: layer.id }
+        }
+        ProjectCommand::RemoveLayer { layer_id } => {
+            let (track, layer) = project
+                .tracks
+                .iter()
+                .find_map(|track| {
+                    track
+                        .layers
+                        .iter()
+                        .find(|layer| layer.id == *layer_id)
+                        .map(|layer| (track, layer))
+                })
+                .ok_or_else(|| missing(format!("layer {layer_id} does not exist")))?;
+            ProjectCommand::AddLayer {
+                track_id: track.id,
+                layer: layer.clone(),
+            }
+        }
+        ProjectCommand::SetTrackMute { track_id, .. } => {
+            let track = find_track(project, *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::SetTrackMute {
+                track_id: *track_id,
+                muted: flag(track, "mute"),
+            }
+        }
+        ProjectCommand::SetTrackSolo { track_id, .. } => {
+            let track = find_track(project, *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::SetTrackSolo {
+                track_id: *track_id,
+                soloed: flag(track, "solo"),
+            }
+        }
+        ProjectCommand::SetClipPan { clip_id, .. } => {
+            let (_, _, clip) = find_clip(project, *clip_id)
+                .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
+            ProjectCommand::SetClipPan {
+                clip_id: *clip_id,
+                pan: match clip.parameters.get("pan") {
+                    Some(ParameterValue::Float(value)) => *value,
+                    _ => 0.0,
+                },
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
@@ -224,4 +279,12 @@ fn find_clip(
                 .map(|clip| (track.id, layer.id, clip))
         })
     })
+}
+
+fn find_track(project: &Project, track_id: TrackId) -> Option<&Track> {
+    project.tracks.iter().find(|track| track.id == track_id)
+}
+
+fn flag(track: &Track, key: &str) -> bool {
+    matches!(track.parameters.get(key), Some(ParameterValue::Bool(true)))
 }

@@ -1,8 +1,15 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use jutsu_audio_commands::ProjectCommand;
-use jutsu_audio_engine::{ExportEncoding, ExportRange, OfflineExporter, PlaybackSnapshot};
-use jutsu_audio_model::{AssetId, Clip, ClipId, LayerId, ParameterValue, Project, TrackId};
+use jutsu_audio_engine::{
+    ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
+    mix_project,
+};
+use jutsu_audio_model::{
+    AssetId, AudioAssetSource, Clip, ClipId, Layer, LayerId, ParameterValue, Project, Track,
+    TrackId,
+};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
 use serde::Deserialize;
@@ -77,6 +84,35 @@ enum Request {
         protocol_version: u32,
         path: PathBuf,
     },
+    AddTrack {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+    },
+    AddLayer {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        name: String,
+    },
+    SetTrackMute {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        muted: bool,
+    },
+    SetTrackSolo {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        soloed: bool,
+    },
+    SetClipPan {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        pan: f64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -127,6 +163,21 @@ impl Request {
                 protocol_version, ..
             }
             | Self::SessionStatus {
+                protocol_version, ..
+            }
+            | Self::AddTrack {
+                protocol_version, ..
+            }
+            | Self::AddLayer {
+                protocol_version, ..
+            }
+            | Self::SetTrackMute {
+                protocol_version, ..
+            }
+            | Self::SetTrackSolo {
+                protocol_version, ..
+            }
+            | Self::SetClipPan {
                 protocol_version, ..
             } => *protocol_version,
         }
@@ -298,6 +349,85 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "transport_requested", "action": format!("{action:?}").to_lowercase(), "position_frames": position_frames, "delivery": delivery}),
             )
         }
+        Request::AddTrack { path, name, .. } => {
+            let track = Track {
+                id: TrackId::new(),
+                name,
+                // Read from the file rather than the session: the master bus is
+                // fixed when a project is created and no command moves it.
+                output_bus_id: ProjectStore::open(&path)
+                    .map_err(project_error)?
+                    .project
+                    .master_bus_id,
+                parameters: BTreeMap::new(),
+                layers: vec![Layer {
+                    id: LayerId::new(),
+                    name: "Layer 1".into(),
+                    clips: Vec::new(),
+                }],
+            };
+            let track_id = track.id;
+            let layer_id = track.layers[0].id;
+            let applied = cli_session::apply(&path, vec![ProjectCommand::AddTrack { track }])?;
+            Ok(
+                json!({"type": "track_added", "track_id": track_id, "layer_id": layer_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::AddLayer {
+            path,
+            track_id,
+            name,
+            ..
+        } => {
+            let layer = Layer {
+                id: LayerId::new(),
+                name,
+                clips: Vec::new(),
+            };
+            let layer_id = layer.id;
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::AddLayer { track_id, layer }])?;
+            Ok(
+                json!({"type": "layer_added", "track_id": track_id, "layer_id": layer_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetTrackMute {
+            path,
+            track_id,
+            muted,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetTrackMute { track_id, muted }],
+            )?;
+            Ok(
+                json!({"type": "track_mute_set", "track_id": track_id, "muted": muted, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetTrackSolo {
+            path,
+            track_id,
+            soloed,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetTrackSolo { track_id, soloed }],
+            )?;
+            Ok(
+                json!({"type": "track_solo_set", "track_id": track_id, "soloed": soloed, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetClipPan {
+            path, clip_id, pan, ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::SetClipPan { clip_id, pan }])?;
+            Ok(
+                json!({"type": "clip_pan_set", "clip_id": clip_id, "pan": pan, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -328,94 +458,61 @@ impl From<TransportAction> for SessionTransportAction {
     }
 }
 
+/// Builds the master mix the same way playback does — through
+/// `jutsu-audio-engine` — so an exported WAV is what the editor plays.
+///
+/// The project's rate is taken from its first decodable source, because the
+/// schema has no rate field yet; a clip at another rate is resampled onto it.
 fn build_master_snapshot(
     project: &Project,
     project_path: &Path,
 ) -> Result<std::sync::Arc<PlaybackSnapshot>, (i32, &'static str, String)> {
     let project_directory = project_path.parent().unwrap_or_else(|| Path::new("."));
-    let clips: Vec<_> = project
-        .tracks
-        .iter()
-        .flat_map(|track| &track.layers)
-        .flat_map(|layer| &layer.clips)
-        .collect();
-    let end_frame = clips
-        .iter()
-        .map(|clip| clip.start_sample.saturating_add(clip.duration_samples))
-        .max()
-        .unwrap_or(0);
-    let mut format = None;
-    let mut decoded = Vec::new();
-    for clip in clips {
-        let asset = project
-            .assets
-            .iter()
-            .find(|asset| asset.id == clip.asset_id)
-            .ok_or_else(|| {
-                (
-                    4,
-                    "command_failed",
-                    format!("asset {} is missing", clip.asset_id),
-                )
-            })?;
-        let jutsu_audio_model::AudioAssetSource::ManagedFile { path, .. } = &asset.source else {
-            return Err((
-                3,
-                "export_failed",
-                "only managed WAV clips can be exported in MVP".into(),
-            ));
+    let mut decoded: HashMap<AssetId, SourceAudio> = HashMap::new();
+    for asset in &project.assets {
+        let path = match &asset.source {
+            AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
+            AudioAssetSource::Generated { .. } => continue,
         };
-        let (metadata, samples) = AssetManager::decode_wav_samples(project_directory.join(path))
-            .map_err(project_error)?;
-        let current = (metadata.sample_rate, metadata.channels);
-        if format.is_some_and(|value| value != current) {
-            return Err((
-                3,
-                "export_failed",
-                "all MVP clips must share sample rate and channel count".into(),
-            ));
-        }
-        format = Some(current);
-        decoded.push((clip, metadata, samples));
+        let Ok((metadata, samples)) =
+            AssetManager::decode_wav_samples(project_directory.join(path))
+        else {
+            // Left out of the map: a clip that needs it fails the mix with a
+            // structured error naming the clip, which is more use than naming
+            // the file here.
+            continue;
+        };
+        decoded.insert(
+            asset.id,
+            SourceAudio {
+                sample_rate: metadata.sample_rate,
+                channels: metadata.channels,
+                samples: samples.into(),
+            },
+        );
     }
-    let (sample_rate, channels) = format.unwrap_or((48_000, 2));
-    let sample_count = usize::try_from(end_frame)
-        .unwrap_or(usize::MAX)
-        .checked_mul(usize::from(channels))
-        .ok_or_else(|| (3, "export_failed", "project duration is too large".into()))?;
-    let mut master = vec![0.0_f32; sample_count];
-    for (clip, metadata, samples) in decoded {
-        let channels = usize::from(metadata.channels);
-        let source_start = usize::try_from(clip.source_start_sample)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(channels);
-        let length = usize::try_from(clip.duration_samples)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(channels);
-        let destination = usize::try_from(clip.start_sample)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(channels);
-        let available = samples
-            .len()
-            .saturating_sub(source_start)
-            .min(length)
-            .min(master.len().saturating_sub(destination));
-        let gain_db = clip
-            .parameters
-            .get("gain_db")
-            .and_then(|value| match value {
-                ParameterValue::Float(value) => Some(*value),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-        let gain = 10_f32.powf(gain_db as f32 / 20.0);
-        for index in 0..available {
-            master[destination + index] += samples[source_start + index] * gain;
-        }
-    }
-    PlaybackSnapshot::new(sample_rate, channels, master.into())
-        .map(std::sync::Arc::new)
-        .map_err(|error| (3, "export_failed", error.message))
+
+    let sample_rate = project
+        .assets
+        .iter()
+        .find_map(|asset| decoded.get(&asset.id))
+        .map_or(48_000, |source| source.sample_rate);
+
+    let mixed = mix_project(project, sample_rate, |asset_id| {
+        decoded
+            .get(&asset_id)
+            .cloned()
+            .ok_or_else(|| format!("asset {asset_id} has no readable WAV source"))
+    })
+    .map_err(|error| (3, "export_failed", error.message))?;
+
+    let snapshot = match mixed {
+        Some(snapshot) => snapshot,
+        // Exporting silence beats failing: the caller asked for a file.
+        None => PlaybackSnapshot::new(sample_rate, MIX_CHANNELS, std::sync::Arc::from(Vec::new()))
+            .map_err(|error| (3, "export_failed", error.message))?,
+    };
+    Ok(std::sync::Arc::new(snapshot))
 }
 
 fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static str, String) {

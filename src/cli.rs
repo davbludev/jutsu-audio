@@ -8,8 +8,8 @@ use jutsu_audio_engine::{
     mix_project,
 };
 use jutsu_audio_model::{
-    AssetId, AudioAssetSource, Clip, ClipId, Layer, LayerId, ParameterValue, Project, Track,
-    TrackId,
+    AssetId, AudioAssetSource, Clip, ClipId, Layer, LayerId, LoopRegion, Marker, MarkerId,
+    ParameterValue, Project, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -75,6 +75,10 @@ enum Request {
         start_frame: u64,
         #[serde(default = "full_frame_count")]
         frame_count: u64,
+        /// Render the project's active loop instead of the whole timeline, so
+        /// an exported loop matches what playback repeats.
+        #[serde(default)]
+        use_loop_region: bool,
     },
     #[serde(rename = "transport_request")]
     Transport {
@@ -148,6 +152,39 @@ enum Request {
         first_clip_id: ClipId,
         second_clip_id: ClipId,
     },
+    AddMarker {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+        frame: u64,
+    },
+    MoveMarker {
+        protocol_version: u32,
+        path: PathBuf,
+        marker_id: MarkerId,
+        frame: u64,
+    },
+    RemoveMarker {
+        protocol_version: u32,
+        path: PathBuf,
+        marker_id: MarkerId,
+    },
+    SetLoopRegion {
+        protocol_version: u32,
+        path: PathBuf,
+        start_frame: u64,
+        end_frame: u64,
+        #[serde(default = "enabled_by_default")]
+        enabled: bool,
+    },
+    ClearLoopRegion {
+        protocol_version: u32,
+        path: PathBuf,
+    },
+}
+
+const fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -228,6 +265,21 @@ impl Request {
                 protocol_version, ..
             }
             | Self::CrossfadeClips {
+                protocol_version, ..
+            }
+            | Self::AddMarker {
+                protocol_version, ..
+            }
+            | Self::MoveMarker {
+                protocol_version, ..
+            }
+            | Self::RemoveMarker {
+                protocol_version, ..
+            }
+            | Self::SetLoopRegion {
+                protocol_version, ..
+            }
+            | Self::ClearLoopRegion {
                 protocol_version, ..
             } => *protocol_version,
         }
@@ -380,9 +432,20 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             encoding,
             start_frame,
             frame_count,
+            use_loop_region,
             ..
         } => {
             let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let (start_frame, frame_count) = if use_loop_region {
+                let region = project.loop_region.filter(LoopRegion::is_active).ok_or((
+                    3,
+                    "export_failed",
+                    "this project has no active loop region to export".to_owned(),
+                ))?;
+                (region.start_frame, region.frame_count())
+            } else {
+                (start_frame, frame_count)
+            };
             let snapshot = build_master_snapshot(&project, &path)?;
             let encoding = match encoding {
                 CliExportEncoding::Pcm16 => ExportEncoding::Pcm16,
@@ -564,6 +627,70 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             let applied = cli_session::apply(&path, commands)?;
             Ok(
                 json!({"type": "clips_crossfaded", "first_clip_id": first_clip_id, "second_clip_id": second_clip_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::AddMarker {
+            path, name, frame, ..
+        } => {
+            let marker = Marker {
+                id: MarkerId::new(),
+                name,
+                frame,
+            };
+            let marker_id = marker.id;
+            let applied = cli_session::apply(&path, vec![ProjectCommand::AddMarker { marker }])?;
+            Ok(
+                json!({"type": "marker_added", "marker_id": marker_id, "frame": frame, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::MoveMarker {
+            path,
+            marker_id,
+            frame,
+            ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::MoveMarker { marker_id, frame }])?;
+            Ok(
+                json!({"type": "marker_moved", "marker_id": marker_id, "frame": frame, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::RemoveMarker {
+            path, marker_id, ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::RemoveMarker { marker_id }])?;
+            Ok(
+                json!({"type": "marker_removed", "marker_id": marker_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetLoopRegion {
+            path,
+            start_frame,
+            end_frame,
+            enabled,
+            ..
+        } => {
+            let region = LoopRegion {
+                start_frame,
+                end_frame,
+                enabled,
+            };
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetLoopRegion {
+                    region: Some(region),
+                }],
+            )?;
+            Ok(
+                json!({"type": "loop_region_set", "start_frame": start_frame, "end_frame": end_frame, "enabled": enabled, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::ClearLoopRegion { path, .. } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::SetLoopRegion { region: None }])?;
+            Ok(
+                json!({"type": "loop_region_cleared", "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
         Request::SessionStatus { path, .. } => {

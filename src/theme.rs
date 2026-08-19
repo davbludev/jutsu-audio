@@ -18,6 +18,9 @@ pub const FAINT: Color32 = Color32::from_rgb(0x5c, 0x64, 0x72);
 pub const SIGNAL: Color32 = Color32::from_rgb(0xf0, 0xa5, 0x31);
 pub const LIVE: Color32 = Color32::from_rgb(0x57, 0xc9, 0x8a);
 pub const DANGER: Color32 = Color32::from_rgb(0xe0, 0x73, 0x6b);
+/// Markers and the loop region: cool, so they read as positions on the
+/// timeline rather than as levels or state.
+pub const ACCENT: Color32 = Color32::from_rgb(0x4f, 0xd6, 0xff);
 pub const DANGER_BG: Color32 = Color32::from_rgb(0x33, 0x1f, 0x21);
 
 /// Console is a 2px-radius design. One constant so it stays that way.

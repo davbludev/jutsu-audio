@@ -52,6 +52,8 @@ fn fixture() -> Fixture {
                 parameters: BTreeMap::new(),
             }],
             master_bus_id: bus_id,
+            markers: Vec::new(),
+            loop_region: None,
             tracks: vec![Track {
                 id: track_id,
                 name: "SFX".into(),

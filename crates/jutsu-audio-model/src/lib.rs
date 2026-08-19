@@ -51,6 +51,7 @@ entity_id!(TrackId);
 entity_id!(LayerId);
 entity_id!(ClipId);
 entity_id!(BusId);
+entity_id!(MarkerId);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Project {
@@ -61,6 +62,45 @@ pub struct Project {
     pub buses: Vec<MixerBus>,
     pub master_bus_id: BusId,
     pub tracks: Vec<Track>,
+    /// Named positions on the timeline, in project frames. Ordered by the
+    /// project, not by position — a marker keeps its identity when it moves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+    /// The region playback repeats over, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_region: Option<LoopRegion>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Marker {
+    pub id: MarkerId,
+    pub name: String,
+    pub frame: u64,
+}
+
+/// A half-open range of project frames: `start_frame` plays, `end_frame` does
+/// not. Empty and reversed ranges are rejected by validation rather than
+/// silently repaired, because a loop that plays nothing is a bug upstream.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LoopRegion {
+    pub start_frame: u64,
+    pub end_frame: u64,
+    /// A disabled region is remembered but not played, so toggling looping off
+    /// and on again does not lose where the loop was.
+    pub enabled: bool,
+}
+
+impl LoopRegion {
+    #[must_use]
+    pub const fn frame_count(&self) -> u64 {
+        self.end_frame.saturating_sub(self.start_frame)
+    }
+
+    /// True when the region is worth playing: enabled and not empty.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.enabled && self.end_frame > self.start_frame
+    }
 }
 
 impl Project {
@@ -95,6 +135,25 @@ impl Project {
             "tracks",
             &mut diagnostics,
         );
+        validate_unique_ids(
+            self.markers.iter().map(|marker| marker.id),
+            "markers",
+            &mut diagnostics,
+        );
+
+        if let Some(region) = self.loop_region
+            && region.end_frame <= region.start_frame
+        {
+            diagnostics.push(ValidationDiagnostic::new(
+                ValidationCode::InvalidLoopRegion,
+                "loop_region",
+                None,
+                format!(
+                    "loop ends at frame {} which is not after its start at {}",
+                    region.end_frame, region.start_frame
+                ),
+            ));
+        }
 
         let asset_ids: HashSet<_> = self.assets.iter().map(|asset| asset.id).collect();
         let bus_ids: HashSet<_> = self.buses.iter().map(|bus| bus.id).collect();
@@ -295,6 +354,7 @@ pub enum ValidationCode {
     MissingAssetReference,
     MissingBusReference,
     InvalidClipRange,
+    InvalidLoopRegion,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

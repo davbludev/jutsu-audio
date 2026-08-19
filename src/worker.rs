@@ -50,7 +50,12 @@ pub enum Job {
         project_path: Option<PathBuf>,
     },
     /// Ask for a destination, then write the current mix out.
-    Export { snapshot: Arc<PlaybackSnapshot> },
+    Export {
+        snapshot: Arc<PlaybackSnapshot>,
+        /// What to write: the whole timeline, or the loop the transport is
+        /// repeating, so an exported loop is the loop that was heard.
+        range: ExportRange,
+    },
     /// Park unsaved work in the recovery sidecar.
     Autosave {
         path: PathBuf,
@@ -179,16 +184,11 @@ fn run(job: Job, cache: &mut DecodeCache) -> JobResult {
             project,
             project_path,
         } => import(*project, project_path),
-        Job::Export { snapshot } => match pick_export_destination() {
+        Job::Export { snapshot, range } => match pick_export_destination() {
             Some(path) => JobResult::Exported(
-                OfflineExporter::export_wav(
-                    snapshot,
-                    path,
-                    ExportRange::full(),
-                    ExportEncoding::Pcm16,
-                )
-                .map(|report| report.frame_count)
-                .map_err(|error| error.message),
+                OfflineExporter::export_wav(snapshot, path, range, ExportEncoding::Pcm16)
+                    .map(|report| report.frame_count)
+                    .map_err(|error| error.message),
             ),
             None => JobResult::Cancelled,
         },

@@ -330,6 +330,111 @@ fn clips_in(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
+#[test]
+fn markers_and_the_loop_region_survive_a_round_trip_and_bound_an_export() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("agent.jutsu-audio.json");
+    let source = directory.path().join("blip.wav");
+    let output = directory.path().join("loop.wav");
+    write_test_wav(&source);
+
+    let created = invoke(json!({
+        "protocol_version": 1,
+        "operation": "create_project",
+        "path": path,
+        "name": "Agent SFX"
+    }))
+    .1;
+    let imported = invoke(json!({
+        "protocol_version": 1,
+        "operation": "import_sample",
+        "path": path,
+        "source": source
+    }))
+    .1;
+    invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_clip",
+        "path": path,
+        "asset_id": imported["result"]["asset_id"],
+        "track_id": created["result"]["track_id"],
+        "layer_id": created["result"]["layer_id"],
+        "start_sample": 0,
+        "source_start_sample": 0,
+        "duration_samples": 480
+    }));
+
+    let (code, marker) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "add_marker",
+        "path": path,
+        "name": "Impact",
+        "frame": 120
+    }));
+    assert_eq!(code, 0, "{marker}");
+    let marker_id = marker["result"]["marker_id"].clone();
+
+    let (code, moved) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "move_marker",
+        "path": path,
+        "marker_id": marker_id,
+        "frame": 240
+    }));
+    assert_eq!(code, 0, "{moved}");
+
+    let (code, looped) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "set_loop_region",
+        "path": path,
+        "start_frame": 100,
+        "end_frame": 340
+    }));
+    assert_eq!(code, 0, "{looped}");
+    assert_eq!(looped["result"]["enabled"], true);
+
+    let inspected = invoke(json!({
+        "protocol_version": 1,
+        "operation": "inspect_project",
+        "path": path
+    }))
+    .1;
+    let project = &inspected["result"]["project"];
+    assert_eq!(project["markers"][0]["frame"], 240);
+    assert_eq!(project["loop_region"]["start_frame"], 100);
+
+    let (code, exported) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "export_wav",
+        "path": path,
+        "output": output,
+        "encoding": "float32",
+        "use_loop_region": true
+    }));
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(
+        exported["result"]["frame_count"], 240,
+        "an exported loop is exactly the loop that plays"
+    );
+
+    let (code, cleared) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "clear_loop_region",
+        "path": path
+    }));
+    assert_eq!(code, 0, "{cleared}");
+    let (code, refused) = invoke(json!({
+        "protocol_version": 1,
+        "operation": "export_wav",
+        "path": path,
+        "output": output,
+        "encoding": "float32",
+        "use_loop_region": true
+    }));
+    assert_eq!(code, 3, "{refused}");
+    assert_eq!(refused["error"]["code"], "export_failed");
+}
+
 /// Exports the project and returns the loudest absolute sample in the file.
 fn peak_of_export(path: &std::path::Path, output: &std::path::Path) -> f32 {
     let (code, exported) = invoke(json!({

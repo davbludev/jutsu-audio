@@ -3,6 +3,7 @@ use std::sync::Arc;
 use jutsu_audio_engine::{
     PlaybackRenderer, PlaybackSnapshot, SnapshotExchange, TransportController, TransportState,
 };
+use jutsu_audio_model::LoopRegion;
 
 fn mono_snapshot(samples: &[f32]) -> Arc<PlaybackSnapshot> {
     Arc::new(PlaybackSnapshot::new(48_000, 1, Arc::from(samples)).unwrap())
@@ -157,4 +158,60 @@ fn playback_snapshot_validates_interleaved_audio_shape() {
     assert!(PlaybackSnapshot::new(0, 1, Arc::from([0.0])).is_err());
     assert!(PlaybackSnapshot::new(48_000, 0, Arc::from([0.0])).is_err());
     assert!(PlaybackSnapshot::new(48_000, 2, Arc::from([0.0])).is_err());
+}
+
+#[test]
+fn playback_wraps_at_the_loop_end_on_the_exact_frame() {
+    let exchange = SnapshotExchange::new(Some(mono_snapshot(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6])));
+    let transport = TransportController::new();
+    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader(), 48_000, 1);
+    transport.set_loop(Some(LoopRegion {
+        start_frame: 1,
+        end_frame: 4,
+        enabled: true,
+    }));
+    transport.play();
+
+    // Frames 1..4 repeat: 0.2 0.3 0.4 0.2 0.3 0.4 0.2 0.3, and the wrap lands
+    // inside the block rather than at its edge.
+    let mut output = [0.0; 8];
+    renderer.render(&mut output);
+    assert_eq!(output, [0.2, 0.3, 0.4, 0.2, 0.3, 0.4, 0.2, 0.3]);
+    assert_eq!(transport.position_frames(), 3);
+}
+
+#[test]
+fn a_position_outside_the_loop_is_pulled_back_to_its_start() {
+    let exchange = SnapshotExchange::new(Some(mono_snapshot(&[0.1, 0.2, 0.3, 0.4])));
+    let transport = TransportController::new();
+    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader(), 48_000, 1);
+    transport.set_loop(Some(LoopRegion {
+        start_frame: 2,
+        end_frame: 4,
+        enabled: true,
+    }));
+    transport.seek(0);
+    transport.play();
+
+    let mut output = [0.0; 2];
+    renderer.render(&mut output);
+    assert_eq!(output, [0.3, 0.4], "playback jumps into the loop");
+}
+
+#[test]
+fn a_disabled_or_empty_loop_plays_straight_through() {
+    let exchange = SnapshotExchange::new(Some(mono_snapshot(&[0.1, 0.2, 0.3, 0.4])));
+    let transport = TransportController::new();
+    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader(), 48_000, 1);
+    transport.set_loop(Some(LoopRegion {
+        start_frame: 1,
+        end_frame: 3,
+        enabled: false,
+    }));
+    assert!(transport.loop_bounds().is_none());
+    transport.play();
+
+    let mut output = [0.0; 4];
+    renderer.render(&mut output);
+    assert_eq!(output, [0.1, 0.2, 0.3, 0.4]);
 }

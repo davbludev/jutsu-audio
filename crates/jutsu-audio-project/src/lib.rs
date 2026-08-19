@@ -153,6 +153,8 @@ impl ProjectStore {
                     clips: Vec::new(),
                 }],
             }],
+            markers: Vec::new(),
+            loop_region: None,
         }
     }
 

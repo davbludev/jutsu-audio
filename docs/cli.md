@@ -51,3 +51,15 @@ and the response's revision reflects what was stored.
 
 Refused edits — splitting outside a clip, cross-fading clips that do not overlap, naming a clip
 that is gone — exit `4` with `command_failed` and change nothing.
+
+## Markers and the loop region
+
+`add_marker`, `move_marker` and `remove_marker` keep named positions on the timeline; markers
+have stable IDs and keep them when they move. `set_loop_region` takes `start_frame`, `end_frame`
+and an optional `enabled` (default `true`); `clear_loop_region` forgets the region entirely,
+while `enabled: false` remembers where it was without playing it.
+
+`export_wav` accepts `use_loop_region: true`, which writes exactly the frames the loop repeats
+and fails with `export_failed` when there is no active loop. The editor's own Export WAV does
+the same thing, and playback wraps on the same frame, so a loop sounds the same however it is
+rendered.

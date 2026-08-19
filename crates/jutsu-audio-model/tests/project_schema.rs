@@ -31,6 +31,8 @@ fn valid_project() -> Project {
             parameters: BTreeMap::from([("gain_db".into(), ParameterValue::Float(0.0))]),
         }],
         master_bus_id: bus_id,
+        markers: Vec::new(),
+        loop_region: None,
         tracks: vec![Track {
             id: TrackId::new(),
             name: "Impact".into(),

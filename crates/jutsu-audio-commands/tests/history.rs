@@ -26,6 +26,8 @@ fn project() -> Project {
             parameters: BTreeMap::new(),
         }],
         master_bus_id: bus_id,
+        markers: Vec::new(),
+        loop_region: None,
         tracks: vec![Track {
             id: TrackId::new(),
             name: "SFX".into(),

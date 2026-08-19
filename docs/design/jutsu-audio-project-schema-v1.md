@@ -68,3 +68,15 @@ Validation is side-effect free and reports all discovered issues in one pass. In
 ## Deferred schema work
 
 File-format framing, migration orchestration, unknown-field preservation, asset fingerprints, routing-cycle checks, automation, effect state, synth events, tempo maps, presets, and extension state belong to their scheduled tasks. Add them through explicit schema versions and migrations, not ad hoc fields.
+
+## Markers and the loop region (additive)
+
+`markers` and `loop_region` are optional members of the project object. Both are omitted when
+unused, so a project without either serializes exactly as it did before they existed and older
+files load unchanged — no schema version bump.
+
+A marker is `{ id, name, frame }`, where `frame` is a project frame. IDs are stable across moves.
+
+`loop_region` is `{ start_frame, end_frame, enabled }`, half-open: `start_frame` plays,
+`end_frame` does not. Validation rejects a region whose end is not after its start. `enabled`
+exists so switching looping off does not lose where the loop was.

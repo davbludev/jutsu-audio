@@ -253,6 +253,33 @@ fn invert_command(
                 fade_out_samples: crate::edits::fade_out(clip),
             }
         }
+        ProjectCommand::AddMarker { marker } => ProjectCommand::RemoveMarker {
+            marker_id: marker.id,
+        },
+        ProjectCommand::RemoveMarker { marker_id } => {
+            let marker = project
+                .markers
+                .iter()
+                .find(|marker| marker.id == *marker_id)
+                .ok_or_else(|| missing(format!("marker {marker_id} does not exist")))?;
+            ProjectCommand::AddMarker {
+                marker: marker.clone(),
+            }
+        }
+        ProjectCommand::MoveMarker { marker_id, .. } => {
+            let marker = project
+                .markers
+                .iter()
+                .find(|marker| marker.id == *marker_id)
+                .ok_or_else(|| missing(format!("marker {marker_id} does not exist")))?;
+            ProjectCommand::MoveMarker {
+                marker_id: *marker_id,
+                frame: marker.frame,
+            }
+        }
+        ProjectCommand::SetLoopRegion { .. } => ProjectCommand::SetLoopRegion {
+            region: project.loop_region,
+        },
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

@@ -1,8 +1,8 @@
 use std::fmt;
 
 use jutsu_audio_model::{
-    Asset, AssetId, Clip, ClipId, Layer, LayerId, ParameterValue, Project, Track, TrackId,
-    ValidationDiagnostic,
+    Asset, AssetId, Clip, ClipId, Layer, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
+    Project, Track, TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -113,6 +113,20 @@ pub enum ProjectCommand {
         fade_in_samples: u64,
         fade_out_samples: u64,
     },
+    AddMarker {
+        marker: Marker,
+    },
+    RemoveMarker {
+        marker_id: MarkerId,
+    },
+    MoveMarker {
+        marker_id: MarkerId,
+        frame: u64,
+    },
+    /// `None` clears the loop entirely; a disabled region is remembered.
+    SetLoopRegion {
+        region: Option<LoopRegion>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -131,6 +145,8 @@ pub enum EntityKind {
     Clip,
     Track,
     Layer,
+    Marker,
+    LoopRegion,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -532,6 +548,68 @@ pub(crate) fn apply_command(
                 kind: ChangeKind::Updated,
                 entity_kind: EntityKind::Clip,
                 entity_id: clip_id.to_string(),
+            }
+        }
+        ProjectCommand::AddMarker { marker } => {
+            project.markers.push(marker.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Marker,
+                entity_id: marker.id.to_string(),
+            }
+        }
+        ProjectCommand::RemoveMarker { marker_id } => {
+            let index = project
+                .markers
+                .iter()
+                .position(|marker| marker.id == *marker_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("marker {marker_id} does not exist"),
+                    )
+                })?;
+            project.markers.remove(index);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Marker,
+                entity_id: marker_id.to_string(),
+            }
+        }
+        ProjectCommand::MoveMarker { marker_id, frame } => {
+            let marker = project
+                .markers
+                .iter_mut()
+                .find(|marker| marker.id == *marker_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("marker {marker_id} does not exist"),
+                    )
+                })?;
+            marker.frame = *frame;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Marker,
+                entity_id: marker_id.to_string(),
+            }
+        }
+        ProjectCommand::SetLoopRegion { region } => {
+            project.loop_region = *region;
+            ChangeEvent {
+                sequence: 0,
+                kind: if region.is_some() {
+                    ChangeKind::Updated
+                } else {
+                    ChangeKind::Removed
+                },
+                entity_kind: EntityKind::LoopRegion,
+                entity_id: project.id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

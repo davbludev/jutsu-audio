@@ -224,8 +224,10 @@ impl TimelineView {
 
         self.paint_ruler(&painter, ruler_rect, content_left);
         self.paint_lanes(&painter, lanes_rect, lane_count);
+        self.paint_loop_region(&painter, ruler_rect, lanes_rect, content_left, context);
         actions.extend(self.clips(ui, lanes_rect, content_left, context));
         self.paint_playhead(&painter, ruler_rect, lanes_rect, content_left, context);
+        self.paint_markers(&painter, ruler_rect, content_left, context);
         self.paint_headers(&painter, header_rect, context);
         actions.extend(self.header_controls(ui, header_rect, context));
 
@@ -878,6 +880,94 @@ impl TimelineView {
             let [mute, solo] = Self::chip_rects(header_rect, top);
             paint_chip(&painter, mute, "M", track_flag(track, "mute"));
             paint_chip(&painter, solo, "S", track_flag(track, "solo"));
+        }
+    }
+
+    /// Shades the looped span across the ruler and the lanes, so it reads as a
+    /// region of time rather than as two lines.
+    fn paint_loop_region(
+        &self,
+        painter: &egui::Painter,
+        ruler_rect: Rect,
+        lanes_rect: Rect,
+        content_left: f32,
+        context: &TimelineContext<'_>,
+    ) {
+        let Some(region) = context.project.loop_region else {
+            return;
+        };
+        let rate = f64::from(context.sample_rate.max(1));
+        let left = self.x_of(region.start_frame as f64 / rate, content_left);
+        let right = self.x_of(region.end_frame as f64 / rate, content_left);
+        if right <= ruler_rect.left() || left >= ruler_rect.right() {
+            return;
+        }
+        let band = Rect::from_min_max(
+            pos2(left.max(ruler_rect.left()), ruler_rect.top()),
+            pos2(right.min(ruler_rect.right()), lanes_rect.bottom()),
+        );
+        let painter = painter.with_clip_rect(band);
+        // A disabled loop is drawn fainter rather than hidden: it is still
+        // where the loop will be when it is switched back on.
+        let alpha = if region.enabled { 22 } else { 10 };
+        painter.rect_filled(
+            band,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(0x4f, 0xd6, 0xff, alpha),
+        );
+        let edge = Stroke::new(
+            1.0_f32,
+            if region.enabled {
+                theme::SIGNAL
+            } else {
+                theme::RULE
+            },
+        );
+        painter.line_segment([pos2(left, band.top()), pos2(left, band.bottom())], edge);
+        painter.line_segment([pos2(right, band.top()), pos2(right, band.bottom())], edge);
+    }
+
+    /// Markers sit on the ruler: a tick and, where there is room before the
+    /// next one, a name.
+    fn paint_markers(
+        &self,
+        painter: &egui::Painter,
+        ruler_rect: Rect,
+        content_left: f32,
+        context: &TimelineContext<'_>,
+    ) {
+        let painter = painter.with_clip_rect(ruler_rect);
+        let rate = f64::from(context.sample_rate.max(1));
+        let mut ordered: Vec<&jutsu_audio_model::Marker> = context.project.markers.iter().collect();
+        ordered.sort_by_key(|marker| marker.frame);
+
+        for (index, marker) in ordered.iter().enumerate() {
+            let x = self.x_of(marker.frame as f64 / rate, content_left);
+            if x < ruler_rect.left() - 1.0 || x > ruler_rect.right() {
+                continue;
+            }
+            painter.line_segment(
+                [
+                    pos2(x, ruler_rect.top()),
+                    pos2(x, ruler_rect.top() + RULER_HEIGHT * 0.5),
+                ],
+                Stroke::new(1.0_f32, theme::ACCENT),
+            );
+            let room = ordered
+                .get(index + 1)
+                .map_or(ruler_rect.right() - x, |next| {
+                    self.x_of(next.frame as f64 / rate, content_left) - x
+                })
+                .min(ruler_rect.right() - x);
+            if room > 24.0 {
+                painter.text(
+                    pos2(x + 3.0, ruler_rect.top() + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    elide(&marker.name, room - 6.0),
+                    theme::mono(9.0),
+                    theme::ACCENT,
+                );
+            }
         }
     }
 

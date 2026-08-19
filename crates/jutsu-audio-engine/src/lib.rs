@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use arc_swap::ArcSwapOption;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jutsu_audio_extensions::ExtensionTypeId;
-use jutsu_audio_model::{AssetId, BusId, ClipId, ParameterValue, ProjectId};
+use jutsu_audio_model::{AssetId, BusId, ClipId, LoopRegion, ParameterValue, ProjectId};
 
 pub mod mixdown;
 
@@ -27,6 +27,22 @@ struct TransportShared {
     /// Peak absolute sample of the last rendered block, as `f32::to_bits`.
     /// Written by the audio callback, read by whoever draws a meter.
     peak_level: AtomicU32,
+    /// Loop bounds in frames, half-open. `loop_end == 0` means "not looping",
+    /// which keeps the callback free of a third atomic to check.
+    loop_start: AtomicU64,
+    loop_end: AtomicU64,
+}
+
+impl TransportShared {
+    /// The active loop, already ordered. Read once per callback.
+    fn loop_bounds(&self) -> Option<(u64, u64)> {
+        let end = self.loop_end.load(Ordering::Acquire);
+        if end == 0 {
+            return None;
+        }
+        let start = self.loop_start.load(Ordering::Acquire);
+        (end > start).then_some((start, end))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +59,8 @@ impl TransportController {
             position_frames: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             peak_level: AtomicU32::new(0),
+            loop_start: AtomicU64::new(0),
+            loop_end: AtomicU64::new(0),
         }))
     }
 
@@ -72,6 +90,27 @@ impl TransportController {
 
     pub fn seek(&self, frame: u64) {
         self.0.position_frames.store(frame, Ordering::Release);
+    }
+
+    /// Sets the region playback repeats over, or clears it. A disabled or empty
+    /// region clears it too: the project remembers where the loop was, the
+    /// transport only needs to know whether to wrap.
+    pub fn set_loop(&self, region: Option<LoopRegion>) {
+        match region.filter(LoopRegion::is_active) {
+            Some(region) => {
+                self.0
+                    .loop_start
+                    .store(region.start_frame, Ordering::Release);
+                self.0.loop_end.store(region.end_frame, Ordering::Release);
+            }
+            None => self.0.loop_end.store(0, Ordering::Release),
+        }
+    }
+
+    /// The bounds the renderer is wrapping between, if any.
+    #[must_use]
+    pub fn loop_bounds(&self) -> Option<(u64, u64)> {
+        self.0.loop_bounds()
     }
 
     #[must_use]
@@ -248,12 +287,48 @@ impl PlaybackRenderer {
         self.last_position = 0;
     }
 
+    /// Renders one device block, wrapping at the loop if there is one.
+    ///
+    /// Looping is done by rendering in segments that stop exactly on the loop
+    /// end, so the wrap lands on a frame rather than on a block boundary.
     pub fn render(&mut self, output: &mut [f32]) {
         output.fill(0.0);
         if load_transport_state(&self.transport.0.state) != TransportState::Playing {
             self.publish_peak(0.0);
             return;
         }
+        let Some((start, end)) = self.transport.0.loop_bounds() else {
+            self.render_block(output);
+            return;
+        };
+        let channels = usize::from(self.output_channels).max(1);
+        let mut filled = 0;
+        while filled < output.len() {
+            let position = self.transport.0.position_frames.load(Ordering::Acquire);
+            if position < start || position >= end {
+                self.transport
+                    .0
+                    .position_frames
+                    .store(start, Ordering::Release);
+                self.fraction = 0.0;
+            }
+            let position = self.transport.0.position_frames.load(Ordering::Acquire);
+            let frames_left = usize::try_from(end.saturating_sub(position)).unwrap_or(usize::MAX);
+            let segment = (output.len() - filled).min(frames_left.saturating_mul(channels));
+            if segment == 0 {
+                break;
+            }
+            self.render_block(&mut output[filled..filled + segment]);
+            filled += segment;
+            if load_transport_state(&self.transport.0.state) != TransportState::Playing {
+                // The material ran out inside the loop; the block already
+                // stopped the transport, and there is nothing left to wrap to.
+                return;
+            }
+        }
+    }
+
+    fn render_block(&mut self, output: &mut [f32]) {
         let Some(snapshot) = self.snapshots.0.load_full() else {
             self.underrun();
             return;

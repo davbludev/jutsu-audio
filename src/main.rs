@@ -21,10 +21,11 @@ use jutsu_audio_commands::{
     ProjectCommand, ProjectCommandEngine,
 };
 use jutsu_audio_engine::{
-    SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
+    ExportRange, SnapshotExchange, SystemAudioOutput, TransportController, TransportState,
 };
 use jutsu_audio_model::{
-    AssetId, AudioAssetSource, Clip, ClipId, LayerId, ParameterValue, Project, TrackId,
+    AssetId, AudioAssetSource, Clip, ClipId, LayerId, LoopRegion, Marker, MarkerId, ParameterValue,
+    Project, TrackId,
 };
 use jutsu_audio_project::{ImportStatus, ProjectStore, autosave};
 use jutsu_audio_session::TransportAction;
@@ -382,6 +383,101 @@ impl JutsuAudioApp {
         if self.apply(vec![ProjectCommand::AddLayer { track_id, layer }]) {
             self.status = Status::info("Layer added");
         }
+    }
+
+    /// Marks the selected clip's span as the loop, or the whole timeline when
+    /// nothing is selected.
+    fn loop_to_selection(&mut self) {
+        let region = self.selected_clip().map_or_else(
+            || LoopRegion {
+                start_frame: 0,
+                end_frame: self.total_frames(),
+                enabled: true,
+            },
+            |clip| LoopRegion {
+                start_frame: clip.start_sample,
+                end_frame: clip.start_sample + clip.duration_samples,
+                enabled: true,
+            },
+        );
+        if region.end_frame <= region.start_frame {
+            self.status = Status::error("There is nothing to loop over yet");
+            return;
+        }
+        if self.apply(vec![ProjectCommand::SetLoopRegion {
+            region: Some(region),
+        }]) {
+            self.status = Status::info("Loop set");
+        }
+    }
+
+    /// Switches looping on or off without forgetting where the loop is.
+    fn toggle_loop(&mut self) {
+        let Some(region) = self.project().loop_region else {
+            self.loop_to_selection();
+            return;
+        };
+        let region = LoopRegion {
+            enabled: !region.enabled,
+            ..region
+        };
+        if self.apply(vec![ProjectCommand::SetLoopRegion {
+            region: Some(region),
+        }]) {
+            self.status = Status::info(if region.enabled {
+                "Looping on"
+            } else {
+                "Looping off"
+            });
+        }
+    }
+
+    fn clear_loop(&mut self) {
+        if self.project().loop_region.is_none() {
+            return;
+        }
+        if self.apply(vec![ProjectCommand::SetLoopRegion { region: None }]) {
+            self.status = Status::info("Loop cleared");
+        }
+    }
+
+    fn add_marker_at_playhead(&mut self) {
+        let frame = self.transport.position_frames();
+        let marker = Marker {
+            id: MarkerId::new(),
+            name: format!("Marker {}", self.project().markers.len() + 1),
+            frame,
+        };
+        if self.apply(vec![ProjectCommand::AddMarker { marker }]) {
+            self.status = Status::info(format!(
+                "Marker at {}",
+                theme::format_time(frame, self.sample_rate())
+            ));
+        }
+    }
+
+    /// Seeks to the nearest marker before or after the playhead. Falls back to
+    /// the start and the end of the project, so the keys always do something.
+    fn jump_to_marker(&mut self, forward: bool) {
+        let position = self.transport.position_frames();
+        let target = if forward {
+            self.project()
+                .markers
+                .iter()
+                .map(|marker| marker.frame)
+                .filter(|frame| *frame > position)
+                .min()
+                .unwrap_or_else(|| self.total_frames())
+        } else {
+            self.project()
+                .markers
+                .iter()
+                .map(|marker| marker.frame)
+                .filter(|frame| *frame < position)
+                .max()
+                .unwrap_or(0)
+        };
+        self.transport.seek(target);
     }
 
     fn selected_clip(&self) -> Option<&Clip> {
@@ -1070,7 +1166,17 @@ impl JutsuAudioApp {
         self.dialog_open = true;
         self.exporting = true;
         self.status = Status::working("Choosing an export destination…");
-        self.send(Job::Export { snapshot });
+        // An active loop is what the user is listening to, so it is what
+        // "Export WAV" writes.
+        let range = self
+            .project()
+            .loop_region
+            .filter(|region| region.is_active())
+            .map_or_else(ExportRange::full, |region| ExportRange {
+                start_frame: region.start_frame,
+                frame_count: region.frame_count(),
+            });
+        self.send(Job::Export { snapshot, range });
     }
 
     fn toggle_playback(&mut self) {
@@ -1108,6 +1214,9 @@ impl eframe::App for JutsuAudioApp {
         self.drain_results();
         self.sync_session(context);
         self.poll_session();
+        // Cheap enough to publish every frame, and it means the renderer can
+        // never be looping over a region the project no longer has.
+        self.transport.set_loop(self.project().loop_region);
         self.dispatch_pending_work();
         self.sync_edit();
         self.meter = (self.meter * METER_DECAY).max(self.transport.peak_level());
@@ -1194,6 +1303,34 @@ impl JutsuAudioApp {
                     input.modifiers.command && input.key_pressed(egui::Key::V),
                 )
             });
+        let (loop_key, marker_key, previous, next, home, end_key) = context.input(|input| {
+            (
+                input.key_pressed(egui::Key::L),
+                input.key_pressed(egui::Key::M),
+                input.key_pressed(egui::Key::Comma),
+                input.key_pressed(egui::Key::Period),
+                input.key_pressed(egui::Key::Home),
+                input.key_pressed(egui::Key::End),
+            )
+        });
+        if loop_key {
+            self.toggle_loop();
+        }
+        if marker_key {
+            self.add_marker_at_playhead();
+        }
+        if previous {
+            self.jump_to_marker(false);
+        }
+        if next {
+            self.jump_to_marker(true);
+        }
+        if home {
+            self.transport.seek(0);
+        }
+        if end_key {
+            self.transport.seek(self.total_frames());
+        }
         if undo {
             self.undo();
         }
@@ -1983,6 +2120,36 @@ impl JutsuAudioApp {
                         .clicked()
                         {
                             self.timeline.snap = !self.timeline.snap;
+                        }
+
+                        ui.add_space(10.0);
+                        let looping = self
+                            .project()
+                            .loop_region
+                            .is_some_and(|region| region.enabled);
+                        if theme::tool_button(ui, "Loop", looping)
+                            .on_hover_text("L — loop the selected clip, or the whole timeline")
+                            .clicked()
+                        {
+                            self.toggle_loop();
+                        }
+                        if theme::tool_button(ui, "Set loop", false)
+                            .on_hover_text("Loop over the selected clip")
+                            .clicked()
+                        {
+                            self.loop_to_selection();
+                        }
+                        if theme::tool_button(ui, "Clear loop", false)
+                            .on_hover_text("Forget the loop region")
+                            .clicked()
+                        {
+                            self.clear_loop();
+                        }
+                        if theme::tool_button(ui, "+ Marker", false)
+                            .on_hover_text("M — drop a marker at the playhead; , and . jump")
+                            .clicked()
+                        {
+                            self.add_marker_at_playhead();
                         }
 
                         ui.add_space(10.0);

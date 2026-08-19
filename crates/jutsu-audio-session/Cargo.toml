@@ -1,0 +1,14 @@
+[package]
+name = "jutsu-audio-session"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+jutsu-audio-commands = { path = "../jutsu-audio-commands" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.24.0", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

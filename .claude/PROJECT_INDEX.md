@@ -40,6 +40,10 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   own format and converts the snapshot onto it; when the formats already match it takes a
   verbatim-copy path, which is what keeps real-time output bit-identical to offline export
   (`tests/offline_export.rs` asserts that).
+- `crates/jutsu-audio-session` — single-writer session layer. `protocol.rs` is the wire
+  contract (newline-delimited JSON over loopback TCP), `discovery.rs` the `.session` sidecar a
+  client dials, `lock.rs` the `.lock` sidecar an offline writer takes. Contract:
+  `docs/design/jutsu-audio-session-protocol-v1.md`.
 - `crates/jutsu-audio-extensions` — compile-time synth/effect/generator registries.
 
 ## Conventions worth knowing before editing

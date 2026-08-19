@@ -10,7 +10,7 @@ cargo quality
 
 This cross-platform Cargo alias runs formatting verification, Clippy with warnings denied, all workspace tests/targets/features, and compilation of every benchmark target. Any nonzero step stops the gate and fails the command.
 
-Run the complete gate before completing a Project Flow task or creating its commit. Focused tests support red/green development but never replace the complete gate.
+Run the complete gate before completing a task in `tasks/` or creating its commit. Focused tests support red/green development but never replace the complete gate.
 
 ## Test placement
 

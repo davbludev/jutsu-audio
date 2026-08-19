@@ -260,6 +260,52 @@ impl AssetManager {
         decode_wav(path.as_ref())
     }
 
+    /// Where `prepare_wav_import` parks the peak cache for a source
+    /// fingerprint. Callers that want to draw a waveform look here first.
+    #[must_use]
+    pub fn waveform_cache_path(project_path: impl AsRef<Path>, fingerprint: &str) -> PathBuf {
+        project_path
+            .as_ref()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".jutsu-audio-cache")
+            .join("waveforms")
+            .join(format!("{fingerprint}.json"))
+    }
+
+    /// Reads the cached peaks for an already-imported asset. Cheap enough to
+    /// call per asset on a worker thread: the cache holds one peak per 1024
+    /// frames, not the audio itself.
+    pub fn load_waveform(
+        project_path: impl AsRef<Path>,
+        fingerprint: &str,
+    ) -> Result<CachedWaveform, ProjectFileError> {
+        let cache_path = Self::waveform_cache_path(project_path, fingerprint);
+        let contents = fs::read(&cache_path)
+            .map_err(|error| ProjectFileError::io(&cache_path, "read waveform cache", error))?;
+        serde_json::from_slice(&contents).map_err(|error| {
+            ProjectFileError::new(
+                ProjectFileErrorCode::InvalidJson,
+                &cache_path,
+                format!("waveform cache is not valid: {error}"),
+            )
+        })
+    }
+
+    /// Rebuilds and rewrites the peak cache for a source file. Used when a
+    /// project is opened whose cache was never written or has been deleted.
+    pub fn rebuild_waveform(
+        project_path: impl AsRef<Path>,
+        source_path: impl AsRef<Path>,
+        fingerprint: &str,
+    ) -> Result<CachedWaveform, ProjectFileError> {
+        let (metadata, samples) = decode_wav(source_path.as_ref())?;
+        let waveform = build_waveform(metadata, &samples);
+        let cache_path = Self::waveform_cache_path(project_path, fingerprint);
+        write_waveform_cache(&cache_path, &waveform)?;
+        Ok(waveform)
+    }
+
     pub fn prepare_wav_import(
         project: &Project,
         project_path: impl AsRef<Path>,
@@ -272,25 +318,11 @@ impl AssetManager {
         let contents = fs::read(source_path)
             .map_err(|error| ProjectFileError::io(source_path, "read WAV source", error))?;
         let fingerprint = sha256_hex(&contents);
-        let (metadata, samples) = decode_wav(source_path)?;
+        // Decode the bytes already in memory instead of reopening the file.
+        let (metadata, samples) = decode_wav_bytes(&contents, source_path)?;
         let waveform = build_waveform(metadata.clone(), &samples);
-        let cache_path = project_directory
-            .join(".jutsu-audio-cache")
-            .join("waveforms")
-            .join(format!("{fingerprint}.json"));
-        if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| ProjectFileError::io(parent, "create waveform cache", error))?;
-        }
-        let mut encoded = serde_json::to_vec_pretty(&waveform).map_err(|error| {
-            ProjectFileError::new(
-                ProjectFileErrorCode::InvalidProject,
-                &cache_path,
-                format!("waveform cache cannot be serialized: {error}"),
-            )
-        })?;
-        encoded.push(b'\n');
-        atomic_write(&cache_path, &encoded)?;
+        let cache_path = Self::waveform_cache_path(project_path, &fingerprint);
+        write_waveform_cache(&cache_path, &waveform)?;
 
         if let Some(existing) = project.assets.iter().find(|asset| {
             matches!(&asset.source, AudioAssetSource::ManagedFile { fingerprint: value, .. } if value == &fingerprint)
@@ -444,13 +476,34 @@ fn sha256_hex(contents: &[u8]) -> String {
 }
 
 fn decode_wav(path: &Path) -> Result<(AudioMetadata, Vec<f32>), ProjectFileError> {
-    let mut reader = WavReader::open(path).map_err(|error| {
+    let reader = WavReader::open(path).map_err(|error| {
         ProjectFileError::new(
             ProjectFileErrorCode::InvalidWav,
             path,
             format!("cannot decode WAV: {error}"),
         )
     })?;
+    decode_wav_reader(reader, path)
+}
+
+fn decode_wav_bytes(
+    contents: &[u8],
+    path: &Path,
+) -> Result<(AudioMetadata, Vec<f32>), ProjectFileError> {
+    let reader = WavReader::new(std::io::Cursor::new(contents)).map_err(|error| {
+        ProjectFileError::new(
+            ProjectFileErrorCode::InvalidWav,
+            path,
+            format!("cannot decode WAV: {error}"),
+        )
+    })?;
+    decode_wav_reader(reader, path)
+}
+
+fn decode_wav_reader<R: std::io::Read>(
+    mut reader: WavReader<R>,
+    path: &Path,
+) -> Result<(AudioMetadata, Vec<f32>), ProjectFileError> {
     let spec = reader.spec();
     if spec.channels == 0 {
         return Err(ProjectFileError::new(
@@ -515,6 +568,27 @@ fn decode_wav(path: &Path) -> Result<(AudioMetadata, Vec<f32>), ProjectFileError
         .into(),
     };
     Ok((metadata, samples))
+}
+
+fn write_waveform_cache(
+    cache_path: &Path,
+    waveform: &CachedWaveform,
+) -> Result<(), ProjectFileError> {
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| ProjectFileError::io(parent, "create waveform cache", error))?;
+    }
+    // Compact, not pretty: this file is machine-read only and gets one entry
+    // per 1024 frames, so pretty-printing triples it for no reader.
+    let mut encoded = serde_json::to_vec(waveform).map_err(|error| {
+        ProjectFileError::new(
+            ProjectFileErrorCode::InvalidProject,
+            cache_path,
+            format!("waveform cache cannot be serialized: {error}"),
+        )
+    })?;
+    encoded.push(b'\n');
+    atomic_write(cache_path, &encoded)
 }
 
 fn build_waveform(metadata: AudioMetadata, samples: &[f32]) -> CachedWaveform {

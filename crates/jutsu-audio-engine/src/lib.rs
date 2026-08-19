@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use arc_swap::ArcSwapOption;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -20,6 +20,9 @@ struct TransportShared {
     state: AtomicU8,
     position_frames: AtomicU64,
     underruns: AtomicU64,
+    /// Peak absolute sample of the last rendered block, as `f32::to_bits`.
+    /// Written by the audio callback, read by whoever draws a meter.
+    peak_level: AtomicU32,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,7 @@ impl TransportController {
             state: AtomicU8::new(TransportState::Stopped as u8),
             position_frames: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            peak_level: AtomicU32::new(0),
         }))
     }
 
@@ -79,6 +83,13 @@ impl TransportController {
     #[must_use]
     pub fn underrun_count(&self) -> u64 {
         self.0.underruns.load(Ordering::Relaxed)
+    }
+
+    /// Peak absolute sample of the most recently rendered block, 0.0 when
+    /// nothing is playing. Meters should apply their own decay on top.
+    #[must_use]
+    pub fn peak_level(&self) -> f32 {
+        f32::from_bits(self.0.peak_level.load(Ordering::Relaxed))
     }
 }
 
@@ -134,6 +145,16 @@ impl PlaybackSnapshot {
     pub const fn channel_count(&self) -> u16 {
         self.channel_count
     }
+
+    #[must_use]
+    pub fn frame_count(&self) -> u64 {
+        (self.samples.len() / usize::from(self.channel_count)) as u64
+    }
+
+    #[must_use]
+    pub fn samples(&self) -> &[f32] {
+        &self.samples
+    }
 }
 
 #[derive(Clone)]
@@ -167,53 +188,212 @@ impl SnapshotExchange {
     }
 }
 
+/// Real-time renderer: pulls the published snapshot, adapts it to the output
+/// device format, and advances the transport.
+///
+/// The audio callback runs this, so it never allocates, locks, or does I/O.
 pub struct PlaybackRenderer {
     snapshots: SnapshotReader,
     transport: TransportReader,
+    output_sample_rate: u32,
+    output_channels: u16,
+    /// Sub-frame read position carried between callbacks. Audio thread only.
+    fraction: f64,
+    /// Last position this renderer wrote, so an external seek can be detected.
+    last_position: u64,
 }
 
 impl PlaybackRenderer {
     #[must_use]
-    pub const fn new(snapshots: SnapshotReader, transport: TransportReader) -> Self {
+    pub const fn new(
+        snapshots: SnapshotReader,
+        transport: TransportReader,
+        output_sample_rate: u32,
+        output_channels: u16,
+    ) -> Self {
         Self {
             snapshots,
             transport,
+            output_sample_rate,
+            output_channels,
+            fraction: 0.0,
+            last_position: 0,
         }
+    }
+
+    fn underrun(&self) {
+        self.transport.0.underruns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn publish_peak(&self, level: f32) {
+        self.transport
+            .0
+            .peak_level
+            .store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Material ran out. Stop and rewind, so the next Play starts from the top
+    /// instead of sitting past the end reporting underruns forever.
+    fn finish(&mut self) {
+        self.transport
+            .0
+            .state
+            .store(TransportState::Stopped as u8, Ordering::Release);
+        self.transport.0.position_frames.store(0, Ordering::Release);
+        self.fraction = 0.0;
+        self.last_position = 0;
     }
 
     pub fn render(&mut self, output: &mut [f32]) {
         output.fill(0.0);
         if load_transport_state(&self.transport.0.state) != TransportState::Playing {
+            self.publish_peak(0.0);
             return;
         }
         let Some(snapshot) = self.snapshots.0.load_full() else {
-            self.transport.0.underruns.fetch_add(1, Ordering::Relaxed);
+            self.underrun();
             return;
         };
-        let channels = usize::from(snapshot.channel_count);
-        if !output.len().is_multiple_of(channels) {
-            self.transport.0.underruns.fetch_add(1, Ordering::Relaxed);
+        let source_channels = usize::from(snapshot.channel_count);
+        let output_channels = usize::from(self.output_channels);
+        if output_channels == 0 || !output.len().is_multiple_of(output_channels) {
+            self.underrun();
             return;
         }
-        let frame = self.transport.0.position_frames.load(Ordering::Acquire);
-        let start = usize::try_from(frame)
+        let total_frames = snapshot.samples.len() / source_channels;
+        let position = self.transport.0.position_frames.load(Ordering::Acquire);
+        if position != self.last_position {
+            // Someone seeked or stopped between callbacks; drop the stale phase.
+            self.fraction = 0.0;
+        }
+        if position >= total_frames as u64 {
+            self.finish();
+            return;
+        }
+
+        if snapshot.sample_rate == self.output_sample_rate && source_channels == output_channels {
+            self.render_direct(&snapshot, output, position, output_channels);
+        } else {
+            self.render_converted(
+                &snapshot,
+                output,
+                position,
+                total_frames,
+                source_channels,
+                output_channels,
+            );
+        }
+    }
+
+    /// Device format already matches the snapshot: copy verbatim, so real-time
+    /// output stays bit-identical to what `OfflineExporter` writes.
+    fn render_direct(
+        &mut self,
+        snapshot: &PlaybackSnapshot,
+        output: &mut [f32],
+        position: u64,
+        channels: usize,
+    ) {
+        let start = usize::try_from(position)
             .ok()
             .and_then(|value| value.checked_mul(channels));
         let Some(source) = start.and_then(|start| snapshot.samples.get(start..)) else {
-            self.transport.0.underruns.fetch_add(1, Ordering::Relaxed);
+            self.underrun();
             return;
         };
         let copied = output.len().min(source.len());
         output[..copied].copy_from_slice(&source[..copied]);
-        let rendered_frames = copied / channels;
+        self.publish_peak(block_peak(&output[..copied]));
+        let advanced = position + (copied / channels) as u64;
         self.transport
             .0
             .position_frames
-            .fetch_add(rendered_frames as u64, Ordering::Release);
+            .store(advanced, Ordering::Release);
+        self.last_position = advanced;
         if copied < output.len() {
-            self.transport.0.underruns.fetch_add(1, Ordering::Relaxed);
+            self.finish();
         }
     }
+
+    /// Sample rates or channel counts differ. Linear interpolation on the time
+    /// axis, `channel % source_channels` fan-out on the channel axis, with a
+    /// straight average when folding down to mono.
+    ///
+    /// ponytail: linear interpolation aliases above ~0.4 Nyquist; swap in a
+    /// windowed-sinc resampler if export quality ever depends on this path.
+    fn render_converted(
+        &mut self,
+        snapshot: &PlaybackSnapshot,
+        output: &mut [f32],
+        position: u64,
+        total_frames: usize,
+        source_channels: usize,
+        output_channels: usize,
+    ) {
+        let ratio = f64::from(snapshot.sample_rate) / f64::from(self.output_sample_rate);
+        let samples = &snapshot.samples;
+        let downmix = output_channels == 1 && source_channels > 1;
+        let mut fraction = self.fraction;
+        let mut frame = position;
+        let mut ended = false;
+
+        for block in output.chunks_exact_mut(output_channels) {
+            let Ok(index) = usize::try_from(frame) else {
+                ended = true;
+                break;
+            };
+            if index >= total_frames {
+                ended = true;
+                break;
+            }
+            let next = (index + 1).min(total_frames - 1);
+            let blend = fraction as f32;
+            let base = index * source_channels;
+            let next_base = next * source_channels;
+
+            if downmix {
+                let scale = 1.0 / source_channels as f32;
+                let mut current = 0.0;
+                let mut upcoming = 0.0;
+                for channel in 0..source_channels {
+                    current += samples[base + channel];
+                    upcoming += samples[next_base + channel];
+                }
+                block[0] = lerp(current * scale, upcoming * scale, blend);
+            } else {
+                for (channel, slot) in block.iter_mut().enumerate() {
+                    let source = channel % source_channels;
+                    *slot = lerp(samples[base + source], samples[next_base + source], blend);
+                }
+            }
+
+            fraction += ratio;
+            let whole = fraction.floor();
+            frame = frame.saturating_add(whole as u64);
+            fraction -= whole;
+        }
+
+        self.fraction = fraction;
+        self.publish_peak(block_peak(output));
+        self.transport
+            .0
+            .position_frames
+            .store(frame, Ordering::Release);
+        self.last_position = frame;
+        if ended {
+            self.finish();
+        }
+    }
+}
+
+fn lerp(from: f32, to: f32, blend: f32) -> f32 {
+    from + (to - from) * blend
+}
+
+fn block_peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
 }
 
 #[derive(Debug)]
@@ -332,7 +512,13 @@ impl OfflineExporter {
 }
 
 impl SystemAudioOutput {
-    pub fn open_default(mut renderer: PlaybackRenderer) -> Result<Self, AudioOutputError> {
+    /// Opens the default device and builds a renderer bound to *that device's*
+    /// format. The renderer cannot be supplied from outside: it has to know the
+    /// real output rate and channel count to convert the snapshot correctly.
+    pub fn open_default(
+        snapshots: SnapshotReader,
+        transport: TransportReader,
+    ) -> Result<Self, AudioOutputError> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or(AudioOutputError::NoOutputDevice)?;
@@ -348,6 +534,7 @@ impl SystemAudioOutput {
         let sample_rate = supported.sample_rate();
         let channel_count = supported.channels();
         let config = supported.config();
+        let mut renderer = PlaybackRenderer::new(snapshots, transport, sample_rate, channel_count);
         let stream = device
             .build_output_stream(
                 &config,

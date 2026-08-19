@@ -45,7 +45,7 @@ fn full_pcm_export_matches_realtime_renderer_with_quantization_tolerance() {
         Arc::new(PlaybackSnapshot::new(44_100, 1, Arc::from([-1.0, -0.25, 0.25, 1.0])).unwrap());
     let exchange = SnapshotExchange::new(Some(Arc::clone(&snapshot)));
     let transport = TransportController::new();
-    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader());
+    let mut renderer = PlaybackRenderer::new(exchange.reader(), transport.reader(), 44_100, 1);
     transport.play();
     let mut realtime = [0.0; 4];
     renderer.render(&mut realtime);

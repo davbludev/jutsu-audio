@@ -1,1 +1,0 @@
-{"action":"task.status_changed","createdAt":"2026-08-14T02:04:34.222Z","entityId":"2f8785e5-3e07-470d-ab91-6ad088d17a16","entityType":"task","id":"0d1190a5-8da1-42db-ace7-4899e8fe00a7","metadata":{"previousStatus":"pending","projectSessionId":"bdbe7312-9137-49c7-b021-ba92c60e5133","status":"in_progress"},"source":"mcp","summary":"Started task “Build minimal GUI sample timeline”"}

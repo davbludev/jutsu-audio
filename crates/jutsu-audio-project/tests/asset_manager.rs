@@ -143,3 +143,36 @@ fn missing_and_changed_managed_sources_return_structured_diagnostics() {
     let missing = AssetManager::verify_sources(&project, &project_path);
     assert_eq!(missing[0].code, AssetDiagnosticCode::MissingSource);
 }
+
+#[test]
+fn cached_waveform_is_readable_back_and_rebuildable_after_deletion() {
+    let directory = tempdir().unwrap();
+    let project_path = directory.path().join("sfx.jutsu-audio.json");
+    let source_path = directory.path().join("source.wav");
+    write_pcm16(&source_path, &[i16::MIN, 0, i16::MAX, 0]);
+    let project = ProjectStore::new_project("SFX");
+
+    let prepared = AssetManager::prepare_wav_import(
+        &project,
+        &project_path,
+        &source_path,
+        ImportMode::CopyIntoProject,
+    )
+    .unwrap();
+    let AudioAssetSource::ManagedFile { fingerprint, .. } =
+        &prepared.asset.as_ref().unwrap().source
+    else {
+        panic!("import produces a managed file");
+    };
+
+    let loaded = AssetManager::load_waveform(&project_path, fingerprint).unwrap();
+    assert_eq!(loaded, prepared.waveform);
+
+    let cache_path = AssetManager::waveform_cache_path(&project_path, fingerprint);
+    fs::remove_file(&cache_path).unwrap();
+    assert!(AssetManager::load_waveform(&project_path, fingerprint).is_err());
+
+    let rebuilt = AssetManager::rebuild_waveform(&project_path, &source_path, fingerprint).unwrap();
+    assert_eq!(rebuilt, prepared.waveform);
+    assert!(cache_path.exists());
+}

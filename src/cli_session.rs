@@ -22,8 +22,9 @@ use serde::Serialize;
 pub type CliFailure = (i32, &'static str, String);
 
 /// How long to wait for another offline writer to finish its batch. Long
-/// enough to ride out a concurrent script, short enough not to look hung.
-const LOCK_WAIT: Duration = Duration::from_secs(2);
+/// enough to ride out a concurrent script on a loaded machine, short enough
+/// not to look hung.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Which route an operation took. Reported in every mutating response so a
 /// caller can tell a live edit from a file edit.

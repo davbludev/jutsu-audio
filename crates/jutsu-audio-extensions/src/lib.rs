@@ -6,12 +6,14 @@ use jutsu_audio_model::ParameterValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod builtin;
+pub mod effects;
 pub mod generators;
 pub mod parameters;
 pub mod recipe;
 pub mod voice;
 
 pub use builtin::register_builtin;
+pub use effects::register_builtin_effects;
 pub use generators::{GeneratorPreset, register_sfx_generators};
 pub use parameters::{strip_parameters, validate_named, validate_value};
 pub use recipe::{GeneratorRecipe, RECIPE_CONTRACT_VERSION, RegenerateMode};
@@ -223,6 +225,12 @@ pub trait SynthFactory: Send + Sync {
 
 pub trait EffectFactory: Send + Sync {
     fn descriptor(&self) -> &ExtensionDescriptor;
+
+    /// Named settings worth starting from. Empty is a fine answer.
+    fn presets(&self) -> &[parameters::Preset] {
+        &[]
+    }
+
     fn instantiate(
         &self,
         parameters: &BTreeMap<String, ParameterValue>,
@@ -319,6 +327,11 @@ impl ExtensionRegistries {
 
     pub fn generator_type_ids(&self) -> impl Iterator<Item = &ExtensionTypeId> {
         self.generators.keys()
+    }
+
+    /// The presets a registered effect ships with.
+    pub fn effect_presets(&self, type_id: &ExtensionTypeId) -> Option<&[parameters::Preset]> {
+        self.effects.get(type_id).map(|factory| factory.presets())
     }
 
     /// The presets a registered generator ships with.

@@ -35,13 +35,8 @@ pub fn register_sfx_generators(registries: &mut ExtensionRegistries) -> Result<(
     Ok(())
 }
 
-/// A named parameter set: somewhere useful to start, and the answer to "what
-/// does this generator sound like" without reading its parameter list.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GeneratorPreset {
-    pub name: &'static str,
-    pub parameters: BTreeMap<String, ParameterValue>,
-}
+/// Presets are the same everywhere: a name and a set of values.
+pub use crate::parameters::Preset as GeneratorPreset;
 
 /// The shape every SFX generator here shares: a descriptor, presets, and a
 /// render function taking the seed and its resolved parameters.
@@ -239,11 +234,5 @@ pub fn descriptor(
 /// One preset, from pairs of parameter ID and value.
 #[must_use]
 pub fn preset(name: &'static str, values: &[(&str, ParameterValue)]) -> GeneratorPreset {
-    GeneratorPreset {
-        name,
-        parameters: values
-            .iter()
-            .map(|(id, value)| ((*id).to_string(), value.clone()))
-            .collect(),
-    }
+    GeneratorPreset::new(name, values)
 }

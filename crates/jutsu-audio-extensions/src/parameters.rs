@@ -82,6 +82,28 @@ pub fn strip_parameters() -> Vec<ParameterDescriptor> {
     ]
 }
 
+/// A named set of parameter values: somewhere useful to start, and the answer
+/// to "what does this sound like" without reading a parameter list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preset {
+    pub name: &'static str,
+    pub parameters: std::collections::BTreeMap<String, ParameterValue>,
+}
+
+impl Preset {
+    /// One preset, from pairs of parameter ID and value.
+    #[must_use]
+    pub fn new(name: &'static str, values: &[(&str, ParameterValue)]) -> Self {
+        Self {
+            name,
+            parameters: values
+                .iter()
+                .map(|(id, value)| ((*id).to_string(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
 /// Finds a declared parameter by ID.
 #[must_use]
 pub fn find<'a>(

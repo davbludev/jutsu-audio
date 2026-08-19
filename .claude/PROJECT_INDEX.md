@@ -78,7 +78,8 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
   registered by `register_builtin`. A synth's whole state is its parameters plus its descriptor's
   `state_version` — there is no separate instance serialization. `recipe.rs` is the seeded
   generator contract; `generators/` holds the SFX generators, one file each over a shared
-  `dsp.rs`.
+  `dsp.rs`; `effects/` the built-in filters, dynamics, delay and reverb; `parameters.rs` the one
+  parameter API (units, ranges, presets, validation) that mixer strips and extensions share.
 
 ## Tests worth knowing about
 

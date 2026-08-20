@@ -39,6 +39,11 @@ it has moved.
   a pack author writes. Rules: `docs/extension-sdk.md`.
 - `crates/jutsu-audio-extensions::conformance` — the checks any extension runs, built-ins
   included (`crates/jutsu-audio-extensions/tests/conformance.rs`).
+- `xtask/src/package.rs` + `smoke.rs` — `cargo package-release` builds a release directory
+  (binaries, docs, generated INSTALL/notices/SHA256SUMS); `cargo smoke <dir>` runs the packaged
+  binaries like a user would. Process and platform list: `docs/release.md`.
+- `src/audio_setup.rs` — the first-run "no output device" notice, with a retry that reopens the
+  default device. Wired in `main.rs::audio_prompt`.
 - `src/cli_batch.rs` — `describe_protocol` (the operation table a test pins against serde's
   accepted variants) and `batch` (rollback by restoring the project bytes; dry run, JSONL
   progress on stderr, timeout as cancellation).

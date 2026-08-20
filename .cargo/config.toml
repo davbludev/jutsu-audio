@@ -1,2 +1,7 @@
 [alias]
-quality = "run --quiet -p xtask -- quality"
+# Built into its own target directory: the gate runs `cargo test --workspace`,
+# which relinks xtask's own binary, and Windows will not overwrite a running
+# executable. Separate directories keep the two out of each other's way.
+quality = "run --quiet -p xtask --target-dir target/xtask -- quality"
+package-release = "run --quiet -p xtask --target-dir target/xtask -- package"
+smoke = "run --quiet -p xtask --target-dir target/xtask -- smoke"

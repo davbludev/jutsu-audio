@@ -2,3 +2,4 @@
 /.superpowers/
 /demo_assets/*
 !/demo_assets/.gitkeep
+/dist

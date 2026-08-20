@@ -1,3 +1,6 @@
+pub mod package;
+pub mod smoke;
+
 use std::env;
 use std::ffi::OsString;
 use std::process::Command;

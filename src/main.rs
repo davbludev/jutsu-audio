@@ -4,6 +4,7 @@
 //! and file dialog happens on the worker (see [`worker`]), and every project
 //! mutation goes through the command engine — never directly.
 
+mod audio_setup;
 mod external_changes;
 mod mixer_panel;
 mod recovery;
@@ -164,6 +165,9 @@ struct JutsuAudioApp {
     transport: TransportController,
     snapshots: SnapshotExchange,
     _audio: Option<SystemAudioOutput>,
+    /// Shown once when there is no output device. Cleared when the user
+    /// answers, so a machine without sound is not nagged all session.
+    audio_notice: bool,
     audio_error: Option<String>,
     meter: f32,
 
@@ -245,6 +249,7 @@ impl JutsuAudioApp {
             transport,
             snapshots,
             _audio: audio,
+            audio_notice: audio_error.is_some(),
             audio_error,
             meter: 0.0,
             worker: Worker::spawn(context.egui_ctx.clone()),
@@ -1309,7 +1314,11 @@ impl JutsuAudioApp {
             };
             return;
         }
-        if self.audio_error.is_some() {
+        if let Some(error) = self.audio_error.clone() {
+            // Pressing play is exactly when this matters, so say it here too
+            // rather than leaving the user with a transport that does nothing.
+            self.status = Status::error(format!("No audio device - playback unavailable: {error}"));
+            self.audio_notice = true;
             return;
         }
         self.transport.play();
@@ -1342,7 +1351,8 @@ impl eframe::App for JutsuAudioApp {
         self.inspector_panel(context);
         self.timeline_panel(context);
         self.recovery_prompt(context);
-        if self.recovery.is_none() {
+        self.audio_prompt(context);
+        if self.recovery.is_none() && !self.audio_notice {
             self.shortcuts(context);
         }
 
@@ -1390,6 +1400,36 @@ impl JutsuAudioApp {
                     self.send(Job::DiscardAutosave { path });
                 }
                 self.status = Status::info("Kept the saved project");
+            }
+        }
+    }
+
+    /// Tells the user once that there is no output device, and lets them plug
+    /// one in and try again without restarting.
+    fn audio_prompt(&mut self, context: &egui::Context) {
+        if !self.audio_notice {
+            return;
+        }
+        let Some(error) = self.audio_error.clone() else {
+            self.audio_notice = false;
+            return;
+        };
+        let Some(decision) = audio_setup::prompt(context, &error) else {
+            return;
+        };
+        self.audio_notice = false;
+        if decision == audio_setup::Decision::Retry {
+            match SystemAudioOutput::open_default(self.snapshots.reader(), self.transport.reader())
+            {
+                Ok(output) => {
+                    self._audio = Some(output);
+                    self.audio_error = None;
+                    self.status = Status::info("Audio output ready");
+                }
+                Err(error) => {
+                    self.audio_error = Some(format!("{error:?}"));
+                    self.status = Status::error("Still no audio device - export still works");
+                }
             }
         }
     }

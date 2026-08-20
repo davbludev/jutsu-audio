@@ -14,6 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub mod autosave;
+pub mod presets;
 pub mod waveform;
 
 pub use waveform::{
@@ -634,7 +635,7 @@ fn path_to_portable_string(path: &Path, error_path: &Path) -> Result<String, Pro
     Ok(parts.join("/"))
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ProjectFileError> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ProjectFileError> {
     let mut file = AtomicWriteFile::open(path)
         .map_err(|error| ProjectFileError::io(path, "open atomic project write", error))?;
     file.write_all(contents)

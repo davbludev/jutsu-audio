@@ -14,13 +14,14 @@ use jutsu_audio_model::{
     ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
     ParameterValue, PatternId, Project, SampleLoopMode, SamplerZone, TempoChange, Track, TrackId,
 };
+use jutsu_audio_project::presets::{IncompatibilityCode, Preset, PresetKind, PresetPayload};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli_session::{self, Applied};
-use crate::{cli_generator, cli_mixer, cli_synth};
+use crate::{cli_generator, cli_mixer, cli_presets, cli_synth};
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -269,6 +270,52 @@ enum Request {
     },
     /// The parameters every track and bus strip has.
     DescribeStrip { protocol_version: u32 },
+    /// Every preset this build can offer: the built-in ones from the
+    /// extensions, and the user ones in the library.
+    ListPresets {
+        protocol_version: u32,
+        path: PathBuf,
+        #[serde(default)]
+        library: Option<PathBuf>,
+    },
+    /// Saves what something in the project is set to, as a user preset.
+    SavePreset {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(flatten)]
+        target: CliPresetTarget,
+        #[serde(default)]
+        library: Option<PathBuf>,
+    },
+    /// Applies a user preset to something in the project.
+    ApplyPreset {
+        protocol_version: u32,
+        path: PathBuf,
+        preset_id: String,
+        #[serde(flatten)]
+        target: CliPresetTarget,
+        #[serde(default)]
+        library: Option<PathBuf>,
+    },
+    ImportPreset {
+        protocol_version: u32,
+        path: PathBuf,
+        from: PathBuf,
+        #[serde(default)]
+        library: Option<PathBuf>,
+    },
+    ExportPreset {
+        protocol_version: u32,
+        path: PathBuf,
+        preset_id: String,
+        kind: CliPresetKind,
+        to: PathBuf,
+        #[serde(default)]
+        library: Option<PathBuf>,
+    },
     /// Creates a sampler instrument from a mapping of the project's samples.
     AddSampler {
         protocol_version: u32,
@@ -526,6 +573,41 @@ impl From<CliZone> for SamplerZone {
                 },
                 _ => SampleLoopMode::OneShot,
             },
+        }
+    }
+}
+
+/// What a preset is saved from or applied to.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliPresetTarget {
+    /// A synth, generator or sampler asset.
+    Asset { asset_id: AssetId },
+    /// A track's effect chain.
+    TrackChain { track_id: TrackId },
+    /// A bus's effect chain.
+    BusChain { bus_id: BusId },
+}
+
+/// The kind of a preset, as a caller names it.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliPresetKind {
+    Synth,
+    Effect,
+    Chain,
+    Generator,
+    Instrument,
+}
+
+impl From<CliPresetKind> for PresetKind {
+    fn from(kind: CliPresetKind) -> Self {
+        match kind {
+            CliPresetKind::Synth => Self::Synth,
+            CliPresetKind::Effect => Self::Effect,
+            CliPresetKind::Chain => Self::Chain,
+            CliPresetKind::Generator => Self::Generator,
+            CliPresetKind::Instrument => Self::Instrument,
         }
     }
 }
@@ -819,6 +901,21 @@ impl Request {
                 protocol_version, ..
             }
             | Self::SetSamplerZones {
+                protocol_version, ..
+            } => *protocol_version,
+            Self::ListPresets {
+                protocol_version, ..
+            }
+            | Self::SavePreset {
+                protocol_version, ..
+            }
+            | Self::ApplyPreset {
+                protocol_version, ..
+            }
+            | Self::ImportPreset {
+                protocol_version, ..
+            }
+            | Self::ExportPreset {
                 protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
@@ -1987,6 +2084,118 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "sampler_zones_set", "asset_id": asset_id, "zone_count": count, "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
+        Request::ListPresets { path, library, .. } => {
+            let registries = crate::extensions::registries();
+            let library = cli_presets::library(&path, library.as_deref());
+            let user: Vec<Value> = library
+                .list()
+                .iter()
+                .map(|preset| {
+                    cli_presets::describe(
+                        preset,
+                        &cli_presets::incompatibilities(preset, registries),
+                    )
+                })
+                .collect();
+            Ok(json!({
+                "type": "presets_listed",
+                "library": library.root(),
+                "builtin": cli_presets::builtin(registries),
+                "user": user,
+            }))
+        }
+        Request::SavePreset {
+            path,
+            name,
+            tags,
+            target,
+            library,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let (kind, capture) = preset_target(&project, target)?;
+            let mut preset = cli_presets::capture(&project, kind, &name, &name, &capture)?;
+            preset.tags = tags;
+            preset.tags.sort();
+            let library = cli_presets::library(&path, library.as_deref());
+            let file = library.save(&preset).map_err(project_error)?;
+            Ok(json!({
+                "type": "preset_saved",
+                "preset_id": preset.id,
+                "kind": kind_name(kind),
+                "file": file,
+            }))
+        }
+        Request::ApplyPreset {
+            path,
+            preset_id,
+            target,
+            library,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let (kind, _) = preset_target(&project, target)?;
+            let library = cli_presets::library(&path, library.as_deref());
+            let preset = library.load(kind, &preset_id).map_err(project_error)?;
+            let registries = crate::extensions::registries();
+            let problems = cli_presets::incompatibilities(&preset, registries);
+            if problems
+                .iter()
+                .any(|problem| problem.code == IncompatibilityCode::NewerSchema)
+            {
+                return Err((
+                    6,
+                    "incompatible_preset",
+                    problems
+                        .iter()
+                        .map(|problem| problem.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ));
+            }
+
+            let commands = apply_preset_commands(&project, &preset, target)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(json!({
+                "type": "preset_applied",
+                "preset_id": preset.id,
+                "revision": applied.revision,
+                "delivery": applied.delivery,
+                // Applied anyway, and reported: a moved state version usually
+                // still means what it said.
+                "incompatibilities": problems
+                    .iter()
+                    .map(|problem| problem.message.clone())
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Request::ImportPreset {
+            path,
+            from,
+            library,
+            ..
+        } => {
+            let library = cli_presets::library(&path, library.as_deref());
+            let preset = library.import(&from).map_err(project_error)?;
+            Ok(
+                json!({"type": "preset_imported", "preset_id": preset.id, "kind": kind_name(preset.kind)}),
+            )
+        }
+        Request::ExportPreset {
+            path,
+            preset_id,
+            kind,
+            to,
+            library,
+            ..
+        } => {
+            let library = cli_presets::library(&path, library.as_deref());
+            let preset = library
+                .load(PresetKind::from(kind), &preset_id)
+                .map_err(project_error)?;
+            library.export(&preset, &to).map_err(project_error)?;
+            Ok(json!({"type": "preset_exported", "preset_id": preset.id, "file": to}))
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -2142,4 +2351,152 @@ fn check_zones(
         }
     }
     Ok(())
+}
+
+/// The preset kind a target implies, and how to capture from it.
+fn preset_target<'a>(
+    project: &'a Project,
+    target: CliPresetTarget,
+) -> Result<(PresetKind, cli_presets::CaptureTarget<'a>), (i32, &'static str, String)> {
+    match target {
+        CliPresetTarget::Asset { asset_id } => {
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| {
+                    (
+                        4,
+                        "command_failed",
+                        format!("asset {asset_id} does not exist"),
+                    )
+                })?;
+            let kind = match &asset.source {
+                AudioAssetSource::Synth { .. } => PresetKind::Synth,
+                AudioAssetSource::Generated { .. } => PresetKind::Generator,
+                AudioAssetSource::Sampler { .. } => PresetKind::Instrument,
+                _ => {
+                    return Err((
+                        6,
+                        "invalid_parameter",
+                        format!("asset {asset_id} is a file, and a file is not a preset"),
+                    ));
+                }
+            };
+            Ok((kind, cli_presets::CaptureTarget::Asset { asset_id }))
+        }
+        CliPresetTarget::TrackChain { track_id } => {
+            let track = project
+                .tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .ok_or_else(|| {
+                    (
+                        4,
+                        "command_failed",
+                        format!("track {track_id} does not exist"),
+                    )
+                })?;
+            Ok((
+                PresetKind::Chain,
+                cli_presets::CaptureTarget::Chain {
+                    effects: &track.effects,
+                },
+            ))
+        }
+        CliPresetTarget::BusChain { bus_id } => {
+            let bus = project
+                .buses
+                .iter()
+                .find(|bus| bus.id == bus_id)
+                .ok_or_else(|| (4, "command_failed", format!("bus {bus_id} does not exist")))?;
+            Ok((
+                PresetKind::Chain,
+                cli_presets::CaptureTarget::Chain {
+                    effects: &bus.effects,
+                },
+            ))
+        }
+    }
+}
+
+/// The commands that put a preset into a project.
+fn apply_preset_commands(
+    project: &Project,
+    preset: &Preset,
+    target: CliPresetTarget,
+) -> Result<Vec<ProjectCommand>, (i32, &'static str, String)> {
+    match (&preset.payload, target) {
+        (PresetPayload::Parameters { parameters, .. }, CliPresetTarget::Asset { asset_id }) => {
+            Ok(vec![ProjectCommand::SetAssetParameters {
+                asset_id,
+                parameters: parameters.clone(),
+            }])
+        }
+        (PresetPayload::Instrument { zones, .. }, CliPresetTarget::Asset { asset_id }) => {
+            Ok(vec![ProjectCommand::SetSamplerZones {
+                asset_id,
+                zones: zones.clone(),
+            }])
+        }
+        (PresetPayload::Chain { steps }, target) => {
+            // Replacing a chain: the old inserts go, the preset's arrive, all in
+            // one batch so the strip is never briefly half-configured.
+            let (existing, effect_target) = match target {
+                CliPresetTarget::TrackChain { track_id } => (
+                    project
+                        .tracks
+                        .iter()
+                        .find(|track| track.id == track_id)
+                        .map(|track| track.effects.clone())
+                        .unwrap_or_default(),
+                    EffectTarget::Track { track_id },
+                ),
+                CliPresetTarget::BusChain { bus_id } => (
+                    project
+                        .buses
+                        .iter()
+                        .find(|bus| bus.id == bus_id)
+                        .map(|bus| bus.effects.clone())
+                        .unwrap_or_default(),
+                    EffectTarget::Bus { bus_id },
+                ),
+                CliPresetTarget::Asset { .. } => {
+                    return Err((
+                        6,
+                        "invalid_parameter",
+                        "a chain preset applies to a track or a bus, not to an asset".to_owned(),
+                    ));
+                }
+            };
+            let mut commands: Vec<ProjectCommand> = existing
+                .iter()
+                .map(|insert| ProjectCommand::RemoveEffect {
+                    effect_id: insert.id,
+                })
+                .collect();
+            commands.extend(cli_presets::inserts_of(steps).into_iter().map(|effect| {
+                ProjectCommand::AddEffect {
+                    target: effect_target,
+                    effect,
+                }
+            }));
+            Ok(commands)
+        }
+        _ => Err((
+            6,
+            "invalid_parameter",
+            format!("preset '{}' does not fit what it was applied to", preset.id),
+        )),
+    }
+}
+
+const fn kind_name(kind: PresetKind) -> &'static str {
+    match kind {
+        PresetKind::Synth => "synth",
+        PresetKind::Effect => "effect",
+        PresetKind::Chain => "chain",
+        PresetKind::Generator => "generator",
+        PresetKind::Instrument => "instrument",
+    }
 }

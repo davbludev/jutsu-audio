@@ -166,3 +166,22 @@ A clip plays a sampler exactly as it plays a synth: the clip carries the notes, 
 `add_synth_clip`-style notes or a pattern. A zone whose asset cannot be read plays silence and
 reports it rather than failing the mix, and a zone naming an asset the project does not have is
 refused before anything is stored.
+
+## Presets
+
+`list_presets` answers with both kinds: the built-in presets the extensions ship (read-only, they
+are code) and the user presets in a library directory — `<project dir>/presets` unless a `library`
+path is given. Each user preset carries its tags, its payload, and any reason it will not fit
+this build.
+
+`save_preset` captures what something is set to right now: an `asset` (a synth, a generator or a
+sampler instrument), or a `track_chain` / `bus_chain` for a whole effect rack. The preset kind
+follows from the target. `apply_preset` puts one back — a chain preset replaces the rack in one
+batch, so a strip is never half-configured.
+
+`import_preset` and `export_preset` move a preset between libraries as a single file.
+
+Incompatibilities are reported rather than assumed: a preset saved at another state version is
+applied and listed in the response's `incompatibilities`, while a preset written by a newer build
+of the format is refused with `incompatible_preset`, because guessing at a format you do not know
+is worse than saying so.

@@ -30,6 +30,8 @@ it has moved.
 - `src/mixer_panel.rs` — the mixer strips, meters, routing and effect racks. Reports actions;
   `main.rs::apply_mixer_action` is what turns them into commands.
 - `src/cli_mixer.rs` — the same surface for the CLI, validating through `parameters`.
+- `crates/jutsu-audio-project::presets` — the user preset library (one file per preset) and the
+  compatibility report; `src/cli_presets.rs` is its machine surface.
 - `src/cli_generator.rs` — generator discovery, recipe validation, preview rendering and the
   derived-ID rules `run_generator` uses.
 - `src/cli_synth.rs` — registry-backed validation and discovery for the CLI; `src/synth_panel.rs`

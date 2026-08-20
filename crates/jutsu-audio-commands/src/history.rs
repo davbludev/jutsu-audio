@@ -484,6 +484,31 @@ fn invert_command(
                 zones: zones.clone(),
             }
         }
+        ProjectCommand::RelinkAsset { asset_id, .. } => {
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| missing(format!("asset {asset_id} does not exist")))?;
+            let jutsu_audio_model::AudioAssetSource::ManagedFile {
+                path,
+                fingerprint,
+                sample_rate,
+                channels,
+                frame_count,
+            } = &asset.source
+            else {
+                return Err(missing(format!("asset {asset_id} is not a managed file")));
+            };
+            ProjectCommand::RelinkAsset {
+                asset_id: *asset_id,
+                path: path.clone(),
+                fingerprint: fingerprint.clone(),
+                sample_rate: *sample_rate,
+                channels: *channels,
+                frame_count: *frame_count,
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

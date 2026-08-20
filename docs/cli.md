@@ -185,3 +185,19 @@ Incompatibilities are reported rather than assumed: a preset saved at another st
 applied and listed in the response's `incompatibilities`, while a preset written by a newer build
 of the format is refused with `incompatible_preset`, because guessing at a format you do not know
 is worse than saying so.
+
+## Bundles and relinking
+
+`bundle_project` packs a project into a directory: the project file, every managed sample under
+`assets/`, and the preset library beside it. Paths inside are rewritten to point within the
+bundle, so it opens the same on another machine, in another folder, under another user name. A
+sample that cannot be read is reported and the bundle is still written — a project missing one
+sound beats no bundle at all.
+
+`check_assets` reports what a project names but cannot read, and any path that would not survive
+the trip: that is what "portable" is checked with.
+
+`relink_assets` searches the paths it is given for the audio a project is missing, matching by
+content fingerprint rather than by name, and repoints the project through an ordinary command —
+so relinking undoes, and an open editor sees it. Anything still missing comes back in
+`unresolved`.

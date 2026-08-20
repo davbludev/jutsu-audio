@@ -14,6 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub mod autosave;
+pub mod bundle;
 pub mod presets;
 pub mod waveform;
 
@@ -483,7 +484,7 @@ fn validate_project(path: &Path, project: &Project) -> Result<(), ProjectFileErr
     }
 }
 
-fn sha256_hex(contents: &[u8]) -> String {
+pub(crate) fn sha256_hex(contents: &[u8]) -> String {
     Sha256::digest(contents)
         .iter()
         .map(|byte| format!("{byte:02x}"))

@@ -241,6 +241,16 @@ pub enum ProjectCommand {
         asset_id: AssetId,
         zones: Vec<SamplerZone>,
     },
+    /// Repoints a managed asset at the file it now lives in, keeping its
+    /// identity — every clip using it follows without being touched.
+    RelinkAsset {
+        asset_id: AssetId,
+        path: String,
+        fingerprint: String,
+        sample_rate: u32,
+        channels: u16,
+        frame_count: u64,
+    },
 }
 
 /// Which chain an insert belongs to.
@@ -1096,6 +1106,39 @@ pub(crate) fn apply_command(
                 ));
             };
             stored.clone_from(zones);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Asset,
+                entity_id: asset_id.to_string(),
+            }
+        }
+        ProjectCommand::RelinkAsset {
+            asset_id,
+            path,
+            fingerprint,
+            sample_rate,
+            channels,
+            frame_count,
+        } => {
+            let asset = project
+                .assets
+                .iter_mut()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("asset {asset_id} does not exist"),
+                    )
+                })?;
+            asset.source = AudioAssetSource::ManagedFile {
+                path: path.clone(),
+                fingerprint: fingerprint.clone(),
+                sample_rate: *sample_rate,
+                channels: *channels,
+                frame_count: *frame_count,
+            };
             ChangeEvent {
                 sequence: 0,
                 kind: ChangeKind::Updated,

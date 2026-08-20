@@ -14,6 +14,7 @@ use jutsu_audio_model::{
     ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
     ParameterValue, PatternId, Project, SampleLoopMode, SamplerZone, TempoChange, Track, TrackId,
 };
+use jutsu_audio_project::bundle;
 use jutsu_audio_project::presets::{IncompatibilityCode, Preset, PresetKind, PresetPayload};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -270,6 +271,25 @@ enum Request {
     },
     /// The parameters every track and bus strip has.
     DescribeStrip { protocol_version: u32 },
+    /// Packs the project, its audio and its preset library into a directory
+    /// that opens anywhere.
+    BundleProject {
+        protocol_version: u32,
+        path: PathBuf,
+        destination: PathBuf,
+    },
+    /// Reports every asset the project names but cannot read, and every path
+    /// that would not survive the trip to another machine.
+    CheckAssets {
+        protocol_version: u32,
+        path: PathBuf,
+    },
+    /// Finds moved or renamed audio by fingerprint and repoints the project.
+    RelinkAssets {
+        protocol_version: u32,
+        path: PathBuf,
+        search_paths: Vec<PathBuf>,
+    },
     /// Every preset this build can offer: the built-in ones from the
     /// extensions, and the user ones in the library.
     ListPresets {
@@ -916,6 +936,15 @@ impl Request {
                 protocol_version, ..
             }
             | Self::ExportPreset {
+                protocol_version, ..
+            } => *protocol_version,
+            Self::BundleProject {
+                protocol_version, ..
+            }
+            | Self::CheckAssets {
+                protocol_version, ..
+            }
+            | Self::RelinkAssets {
                 protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
@@ -2196,6 +2225,98 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             library.export(&preset, &to).map_err(project_error)?;
             Ok(json!({"type": "preset_exported", "preset_id": preset.id, "file": to}))
         }
+        Request::BundleProject {
+            path, destination, ..
+        } => {
+            let report = bundle::bundle(&path, &destination).map_err(project_error)?;
+            Ok(json!({
+                "type": "project_bundled",
+                "project": report.project_path,
+                "assets_copied": report.copied_assets.len(),
+                "presets_copied": report.presets_copied,
+                "unresolved": report
+                    .unresolved
+                    .iter()
+                    .map(|diagnostic| json!({
+                        "asset_id": diagnostic.asset_id,
+                        "path": diagnostic.path,
+                        "message": diagnostic.message,
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Request::CheckAssets { path, .. } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let diagnostics = AssetManager::verify_sources(&project, &path);
+            Ok(json!({
+                "type": "assets_checked",
+                "unresolved": diagnostics
+                    .iter()
+                    .map(|diagnostic| json!({
+                        "asset_id": diagnostic.asset_id,
+                        "path": diagnostic.path,
+                        "message": diagnostic.message,
+                    }))
+                    .collect::<Vec<_>>(),
+                "absolute_paths": bundle::absolute_asset_paths(&project)
+                    .into_iter()
+                    .map(|(asset_id, path)| json!({"asset_id": asset_id, "path": path}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Request::RelinkAssets {
+            path, search_paths, ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let report = bundle::relink(&project, &path, &search_paths);
+            if report.relinked.is_empty() {
+                return Ok(json!({
+                    "type": "assets_relinked",
+                    "relinked": [],
+                    "unresolved": unresolved_json(&report.unresolved),
+                }));
+            }
+
+            // Repointing an asset is an ordinary edit: one batch, one revision,
+            // and visible to an editor that has the project open.
+            let commands: Vec<ProjectCommand> = report
+                .relinked
+                .iter()
+                .filter_map(|(asset_id, found)| {
+                    let asset = project.assets.iter().find(|asset| asset.id == *asset_id)?;
+                    let AudioAssetSource::ManagedFile {
+                        fingerprint,
+                        sample_rate,
+                        channels,
+                        frame_count,
+                        ..
+                    } = &asset.source
+                    else {
+                        return None;
+                    };
+                    Some(ProjectCommand::RelinkAsset {
+                        asset_id: *asset_id,
+                        path: found.to_string_lossy().replace('\\', "/"),
+                        fingerprint: fingerprint.clone(),
+                        sample_rate: *sample_rate,
+                        channels: *channels,
+                        frame_count: *frame_count,
+                    })
+                })
+                .collect();
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(json!({
+                "type": "assets_relinked",
+                "relinked": report
+                    .relinked
+                    .iter()
+                    .map(|(asset_id, found)| json!({"asset_id": asset_id, "path": found}))
+                    .collect::<Vec<_>>(),
+                "unresolved": unresolved_json(&report.unresolved),
+                "revision": applied.revision,
+                "delivery": applied.delivery,
+            }))
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -2499,4 +2620,18 @@ const fn kind_name(kind: PresetKind) -> &'static str {
         PresetKind::Generator => "generator",
         PresetKind::Instrument => "instrument",
     }
+}
+
+/// Asset diagnostics as a caller reads them.
+fn unresolved_json(diagnostics: &[jutsu_audio_project::AssetDiagnostic]) -> Vec<Value> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "asset_id": diagnostic.asset_id,
+                "path": diagnostic.path,
+                "message": diagnostic.message,
+            })
+        })
+        .collect()
 }

@@ -437,6 +437,39 @@ fn invert_command(
         ProjectCommand::SetTempoMap { .. } => ProjectCommand::SetTempoMap {
             changes: project.tempo.clone(),
         },
+        ProjectCommand::AddPattern { pattern } => ProjectCommand::RemovePattern {
+            pattern_id: pattern.id,
+        },
+        ProjectCommand::RemovePattern { pattern_id } => {
+            let pattern = project
+                .patterns
+                .iter()
+                .find(|pattern| pattern.id == *pattern_id)
+                .ok_or_else(|| missing(format!("pattern {pattern_id} does not exist")))?;
+            ProjectCommand::AddPattern {
+                pattern: pattern.clone(),
+            }
+        }
+        ProjectCommand::SetPatternNotes { pattern_id, .. } => {
+            let pattern = project
+                .patterns
+                .iter()
+                .find(|pattern| pattern.id == *pattern_id)
+                .ok_or_else(|| missing(format!("pattern {pattern_id} does not exist")))?;
+            ProjectCommand::SetPatternNotes {
+                pattern_id: *pattern_id,
+                length_frames: pattern.length_frames,
+                notes: pattern.notes.clone(),
+            }
+        }
+        ProjectCommand::SetClipPattern { clip_id, .. } => {
+            let (_, _, clip) = find_clip(project, *clip_id)
+                .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;
+            ProjectCommand::SetClipPattern {
+                clip_id: *clip_id,
+                pattern_id: clip.pattern_id,
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

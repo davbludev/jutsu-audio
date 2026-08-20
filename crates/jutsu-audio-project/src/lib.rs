@@ -159,6 +159,7 @@ impl ProjectStore {
             loop_region: None,
             automation: Vec::new(),
             tempo: Vec::new(),
+            patterns: Vec::new(),
         }
     }
 

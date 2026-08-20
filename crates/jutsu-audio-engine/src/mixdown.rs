@@ -331,7 +331,10 @@ fn render_one_clip(
 ) -> Result<(), MixError> {
     match rendered_source(project, clip) {
         Some(source) => {
-            let source = render_extension_clip(extensions, source, clip, sample_rate)?;
+            // A clip playing a pattern has its notes resolved here, so the
+            // synth sees one flat list however they were written.
+            let notes = clip.resolved_notes(&project.patterns);
+            let source = render_extension_clip(extensions, source, clip, &notes, sample_rate)?;
             // The rendered buffer *is* the clip, so it is read from its start
             // rather than from the clip's source offset.
             let mut placed = clip.clone();
@@ -462,6 +465,7 @@ fn render_extension_clip(
     extensions: &ExtensionRegistries,
     source: &AudioAssetSource,
     clip: &Clip,
+    notes: &[jutsu_audio_model::ClipNote],
     sample_rate: u32,
 ) -> Result<SourceAudio, MixError> {
     let frames = usize::try_from(clip.duration_samples).map_err(|_| {
@@ -515,8 +519,8 @@ fn render_extension_clip(
     synth.prepare(sample_rate);
     synth.reset();
 
-    let mut events = Vec::with_capacity(clip.notes.len() * 2);
-    for note in &clip.notes {
+    let mut events = Vec::with_capacity(notes.len() * 2);
+    for note in notes {
         let start = usize::try_from(note.start_frame).unwrap_or(usize::MAX);
         events.push(NoteEvent::note_on(start, note.pitch_hz, note.velocity));
         events.push(NoteEvent::note_off(

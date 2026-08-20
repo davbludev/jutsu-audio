@@ -563,6 +563,7 @@ impl JutsuAudioApp {
                 pitch_hz: 440.0,
                 velocity: 1.0,
             }],
+            pattern_id: None,
         };
         let clip_id = clip.id;
         // One batch: the synth and the clip that plays it undo together.
@@ -679,6 +680,7 @@ impl JutsuAudioApp {
             source_start_sample: 0,
             duration_samples,
             notes: Vec::new(),
+            pattern_id: None,
             parameters: [("gain_db".to_owned(), ParameterValue::Float(0.0))]
                 .into_iter()
                 .collect(),
@@ -2717,6 +2719,7 @@ mod tests {
             id: ClipId::new(),
             asset_id: AssetId::new(),
             notes: Vec::new(),
+            pattern_id: None,
             start_sample: 100,
             source_start_sample: 5,
             duration_samples: 400,

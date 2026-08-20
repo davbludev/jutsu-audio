@@ -111,3 +111,13 @@ still stands. A lane whose target no longer exists is a validation error, not si
 Conversions live in `jutsu-audio-model::tempo`: frames to beats, beats to frames, frames to
 `bar.beat.tick` and back. Ticks are 960 per beat, which divides cleanly for triplets and
 sixteenths.
+
+## Patterns (additive)
+
+`patterns` is an optional list of `{ id, name, length_frames, notes }`, and a clip may carry an
+optional `pattern_id`. Both are omitted when unused.
+
+A clip plays its own `notes` when it has any; otherwise it plays its pattern, repeated every
+`length_frames` for as long as the clip lasts, with a note that would overrun the clip cut at its
+end. Resolution happens in `Clip::resolved_notes`, so playback, export and the note transforms all
+see the same list.

@@ -3,13 +3,15 @@ use std::fmt;
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, AutomationId, AutomationLane, Breakpoint, BusId, Clip,
     ClipId, ClipNote, EffectId, EffectInsert, Layer, LayerId, LoopRegion, Marker, MarkerId,
-    MixerBus, ParameterValue, Project, TempoChange, Track, TrackId, ValidationDiagnostic,
+    MixerBus, ParameterValue, Pattern, PatternId, Project, TempoChange, Track, TrackId,
+    ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod edits;
 mod history;
+pub mod notes;
 
 pub use history::{CommandHistory, HISTORY_LIMIT, invert};
 
@@ -216,6 +218,23 @@ pub enum ProjectCommand {
     SetTempoMap {
         changes: Vec<TempoChange>,
     },
+    AddPattern {
+        pattern: Pattern,
+    },
+    RemovePattern {
+        pattern_id: PatternId,
+    },
+    /// Replaces a pattern's notes and length. Every clip playing it follows.
+    SetPatternNotes {
+        pattern_id: PatternId,
+        length_frames: u64,
+        notes: Vec<ClipNote>,
+    },
+    /// Points a clip at a pattern, or unlinks it with `None`.
+    SetClipPattern {
+        clip_id: ClipId,
+        pattern_id: Option<PatternId>,
+    },
 }
 
 /// Which chain an insert belongs to.
@@ -247,6 +266,7 @@ pub enum EntityKind {
     Bus,
     Automation,
     Effect,
+    Pattern,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -968,6 +988,86 @@ pub(crate) fn apply_command(
                 kind: ChangeKind::Updated,
                 entity_kind: EntityKind::Project,
                 entity_id: project.id.to_string(),
+            }
+        }
+        ProjectCommand::AddPattern { pattern } => {
+            project.patterns.push(pattern.clone());
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Added,
+                entity_kind: EntityKind::Pattern,
+                entity_id: pattern.id.to_string(),
+            }
+        }
+        ProjectCommand::RemovePattern { pattern_id } => {
+            let index = project
+                .patterns
+                .iter()
+                .position(|pattern| pattern.id == *pattern_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("pattern {pattern_id} does not exist"),
+                    )
+                })?;
+            project.patterns.remove(index);
+            // Clips pointing at it are unlinked in the same batch, so the
+            // project is never left referring to something that is gone.
+            for clip in project
+                .tracks
+                .iter_mut()
+                .flat_map(|track| &mut track.layers)
+                .flat_map(|layer| &mut layer.clips)
+            {
+                if clip.pattern_id == Some(*pattern_id) {
+                    clip.pattern_id = None;
+                }
+            }
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Removed,
+                entity_kind: EntityKind::Pattern,
+                entity_id: pattern_id.to_string(),
+            }
+        }
+        ProjectCommand::SetPatternNotes {
+            pattern_id,
+            length_frames,
+            notes,
+        } => {
+            let pattern = project
+                .patterns
+                .iter_mut()
+                .find(|pattern| pattern.id == *pattern_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("pattern {pattern_id} does not exist"),
+                    )
+                })?;
+            pattern.length_frames = *length_frames;
+            pattern.notes.clone_from(notes);
+            pattern.notes.sort_by_key(|note| note.start_frame);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Pattern,
+                entity_id: pattern_id.to_string(),
+            }
+        }
+        ProjectCommand::SetClipPattern {
+            clip_id,
+            pattern_id,
+        } => {
+            let clip = find_clip_mut(project, *clip_id, command_index)?;
+            clip.pattern_id = *pattern_id;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Clip,
+                entity_id: clip_id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

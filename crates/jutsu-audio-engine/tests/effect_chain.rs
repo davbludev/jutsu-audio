@@ -170,6 +170,7 @@ fn project(track_effects: Vec<EffectInsert>, bus_effects: Vec<EffectInsert>) -> 
                     duration_samples: FRAMES,
                     parameters: BTreeMap::new(),
                     notes: Vec::new(),
+                    pattern_id: None,
                 }],
             }],
             effects: track_effects,
@@ -178,6 +179,7 @@ fn project(track_effects: Vec<EffectInsert>, bus_effects: Vec<EffectInsert>) -> 
         loop_region: None,
         automation: Vec::new(),
         tempo: Vec::new(),
+        patterns: Vec::new(),
     }
 }
 

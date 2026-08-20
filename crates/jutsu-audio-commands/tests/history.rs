@@ -31,6 +31,7 @@ fn project() -> Project {
         loop_region: None,
         automation: Vec::new(),
         tempo: Vec::new(),
+        patterns: Vec::new(),
         tracks: vec![Track {
             id: TrackId::new(),
             name: "SFX".into(),
@@ -64,6 +65,7 @@ fn clip(asset_id: AssetId) -> Clip {
         source_start_sample: 0,
         duration_samples: 100,
         notes: Vec::new(),
+        pattern_id: None,
         parameters: [("gain_db".into(), ParameterValue::Float(-3.0))]
             .into_iter()
             .collect(),

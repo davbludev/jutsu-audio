@@ -135,3 +135,21 @@ the two can never disagree about where bar 9 starts.
 
 A tempo or signature change begins a bar: whatever was left of the bar it lands in counts as a
 short bar of its own. That is what makes position and frame exact inverses of each other.
+
+## Patterns and note transforms
+
+`add_pattern`, `set_pattern_notes` and `remove_pattern` manage reusable note sequences;
+`set_clip_pattern` points a clip at one, or unlinks it when `pattern_id` is omitted. A pattern
+repeats for the length of the clip playing it, so a two-second clip over a half-second pattern
+plays it four times. Removing a pattern unlinks every clip that played it in the same batch, so a
+project is never left pointing at something that is gone. A clip's own notes win over its
+pattern, which is how a one-off variation is made without unlinking first.
+
+Transforms rewrite a clip's notes in one command each — one undo step, and non-destructive in the
+sense that undo puts back exactly what was there:
+
+- `quantise_clip` snaps note starts to `divisions_per_beat` of the project's tempo (4 by default);
+- `transpose_clip` moves every pitch by `semitones`;
+- `humanise_clip` nudges timing and velocity by a bounded amount from an explicit `seed` — the
+  same seed always gives the same result, so a humanised part is still reproducible;
+- `loop_clip_notes` repeats a clip's notes at a fixed period.

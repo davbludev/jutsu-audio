@@ -31,6 +31,7 @@ fn project() -> Project {
         loop_region: None,
         automation: Vec::new(),
         tempo: Vec::new(),
+        patterns: Vec::new(),
         tracks: vec![Track {
             id: TrackId::new(),
             name: "SFX".into(),
@@ -73,6 +74,7 @@ fn updates_and_removes_clip_through_shared_commands() {
         duration_samples: 100,
         parameters: BTreeMap::new(),
         notes: Vec::new(),
+        pattern_id: None,
     };
     initial.assets.push(asset);
     initial.tracks[0].layers[0].clips.push(clip.clone());
@@ -213,6 +215,7 @@ fn validates_batch_final_state_and_commits_references_atomically() {
                         duration_samples: 48_000,
                         parameters: BTreeMap::new(),
                         notes: Vec::new(),
+                        pattern_id: None,
                     },
                 },
             ],
@@ -245,6 +248,7 @@ fn rejects_batch_that_leaves_invalid_project_references() {
         duration_samples: 1,
         parameters: BTreeMap::new(),
         notes: Vec::new(),
+        pattern_id: None,
     });
     let mut engine = ProjectCommandEngine::new(initial.clone()).unwrap();
 

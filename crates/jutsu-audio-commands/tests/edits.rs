@@ -57,6 +57,7 @@ fn fixture() -> Fixture {
             loop_region: None,
             automation: Vec::new(),
             tempo: Vec::new(),
+            patterns: Vec::new(),
             tracks: vec![Track {
                 id: track_id,
                 name: "SFX".into(),
@@ -85,6 +86,7 @@ impl Fixture {
             duration_samples: duration,
             parameters: BTreeMap::new(),
             notes: Vec::new(),
+            pattern_id: None,
         };
         let id = clip.id;
         self.project.tracks[0].layers[0].clips.push(clip);

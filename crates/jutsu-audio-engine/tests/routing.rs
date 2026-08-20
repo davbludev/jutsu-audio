@@ -53,6 +53,7 @@ fn fixture() -> Fixture {
             loop_region: None,
             automation: Vec::new(),
             tempo: Vec::new(),
+            patterns: Vec::new(),
         },
     }
 }
@@ -90,6 +91,7 @@ impl Fixture {
                     duration_samples: FRAMES,
                     parameters: BTreeMap::new(),
                     notes: Vec::new(),
+                    pattern_id: None,
                 }],
             }],
             effects: Vec::new(),

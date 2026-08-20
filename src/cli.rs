@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use jutsu_audio_commands::edits::{self, DeleteMode};
+use jutsu_audio_commands::notes;
 use jutsu_audio_commands::{CommandError, EffectTarget, ProjectCommand};
 use jutsu_audio_engine::{
     ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
@@ -11,7 +12,7 @@ use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, AutomationId, AutomationTarget, Breakpoint, BusId, Clip, ClipId,
     ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
-    ParameterValue, Project, TempoChange, Track, TrackId,
+    ParameterValue, PatternId, Project, TempoChange, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -268,6 +269,64 @@ enum Request {
     },
     /// The parameters every track and bus strip has.
     DescribeStrip { protocol_version: u32 },
+    AddPattern {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+        length_frames: u64,
+        #[serde(default)]
+        notes: Vec<CliNote>,
+    },
+    SetPatternNotes {
+        protocol_version: u32,
+        path: PathBuf,
+        pattern_id: PatternId,
+        length_frames: u64,
+        notes: Vec<CliNote>,
+    },
+    RemovePattern {
+        protocol_version: u32,
+        path: PathBuf,
+        pattern_id: PatternId,
+    },
+    /// Points a clip at a pattern, or unlinks it when `pattern_id` is absent.
+    SetClipPattern {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        #[serde(default)]
+        pattern_id: Option<PatternId>,
+    },
+    QuantiseClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        #[serde(default = "four_divisions")]
+        divisions_per_beat: u32,
+    },
+    TransposeClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        semitones: f64,
+    },
+    HumaniseClip {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        seed: u64,
+        #[serde(default)]
+        timing_frames: u64,
+        #[serde(default)]
+        velocity_amount: f64,
+    },
+    LoopClipNotes {
+        protocol_version: u32,
+        path: PathBuf,
+        clip_id: ClipId,
+        period_frames: u64,
+        repeats: u32,
+    },
     /// Replaces the tempo map. An empty list means the default: 120 BPM, 4/4.
     SetTempoMap {
         protocol_version: u32,
@@ -404,6 +463,11 @@ pub struct CliTempoChange {
 }
 
 const fn four() -> u32 {
+    4
+}
+
+/// Sixteenths: the division a caller almost always means.
+const fn four_divisions() -> u32 {
     4
 }
 
@@ -648,6 +712,30 @@ impl Request {
             | Self::ConvertTime {
                 protocol_version, ..
             } => *protocol_version,
+            Self::AddPattern {
+                protocol_version, ..
+            }
+            | Self::SetPatternNotes {
+                protocol_version, ..
+            }
+            | Self::RemovePattern {
+                protocol_version, ..
+            }
+            | Self::SetClipPattern {
+                protocol_version, ..
+            }
+            | Self::QuantiseClip {
+                protocol_version, ..
+            }
+            | Self::TransposeClip {
+                protocol_version, ..
+            }
+            | Self::HumaniseClip {
+                protocol_version, ..
+            }
+            | Self::LoopClipNotes {
+                protocol_version, ..
+            } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
             Self::ListExtensions { protocol_version } => *protocol_version,
         }
@@ -741,6 +829,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 source_start_sample,
                 duration_samples,
                 notes: Vec::new(),
+                pattern_id: None,
                 parameters: [("gain_db".into(), ParameterValue::Float(gain_db))]
                     .into_iter()
                     .collect(),
@@ -1099,6 +1188,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 duration_samples,
                 parameters: BTreeMap::new(),
                 notes: notes.into_iter().map(ClipNote::from).collect(),
+                pattern_id: None,
             };
             let clip_id = clip.id;
             // One batch: the asset and the clip that needs it arrive together.
@@ -1256,6 +1346,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 duration_samples: frame_count,
                 parameters: BTreeMap::new(),
                 notes: Vec::new(),
+                pattern_id: None,
             };
 
             // Replacing means removing what this recipe produced before, in the
@@ -1638,6 +1729,132 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 "time_signature": format!("{}/{}", tempo.beats_per_bar, tempo.beat_unit),
                 "sample_rate": rate,
             }))
+        }
+        Request::AddPattern {
+            path,
+            name,
+            length_frames,
+            notes,
+            ..
+        } => {
+            let mut pattern = jutsu_audio_model::Pattern {
+                id: PatternId::new(),
+                name,
+                length_frames,
+                notes: notes.into_iter().map(ClipNote::from).collect(),
+            };
+            pattern.notes.sort_by_key(|note| note.start_frame);
+            let pattern_id = pattern.id;
+            let applied = cli_session::apply(&path, vec![ProjectCommand::AddPattern { pattern }])?;
+            Ok(
+                json!({"type": "pattern_added", "pattern_id": pattern_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetPatternNotes {
+            path,
+            pattern_id,
+            length_frames,
+            notes,
+            ..
+        } => {
+            let count = notes.len();
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetPatternNotes {
+                    pattern_id,
+                    length_frames,
+                    notes: notes.into_iter().map(ClipNote::from).collect(),
+                }],
+            )?;
+            Ok(
+                json!({"type": "pattern_notes_set", "pattern_id": pattern_id, "note_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::RemovePattern {
+            path, pattern_id, ..
+        } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::RemovePattern { pattern_id }])?;
+            Ok(
+                json!({"type": "pattern_removed", "pattern_id": pattern_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetClipPattern {
+            path,
+            clip_id,
+            pattern_id,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetClipPattern {
+                    clip_id,
+                    pattern_id,
+                }],
+            )?;
+            Ok(
+                json!({"type": "clip_pattern_set", "clip_id": clip_id, "pattern_id": pattern_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::QuantiseClip {
+            path,
+            clip_id,
+            divisions_per_beat,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let rate = project_sample_rate(&project);
+            let commands = notes::quantise(&project, clip_id, divisions_per_beat, rate)
+                .map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_quantised", "clip_id": clip_id, "divisions_per_beat": divisions_per_beat, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::TransposeClip {
+            path,
+            clip_id,
+            semitones,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands =
+                notes::transpose(&project, clip_id, semitones).map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_transposed", "clip_id": clip_id, "semitones": semitones, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::HumaniseClip {
+            path,
+            clip_id,
+            seed,
+            timing_frames,
+            velocity_amount,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands = notes::humanise(&project, clip_id, seed, timing_frames, velocity_amount)
+                .map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_humanised", "clip_id": clip_id, "seed": seed, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::LoopClipNotes {
+            path,
+            clip_id,
+            period_frames,
+            repeats,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let commands = notes::loop_notes(&project, clip_id, period_frames, repeats)
+                .map_err(command_failed)?;
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(
+                json!({"type": "clip_notes_looped", "clip_id": clip_id, "repeats": repeats, "revision": applied.revision, "delivery": applied.delivery}),
+            )
         }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;

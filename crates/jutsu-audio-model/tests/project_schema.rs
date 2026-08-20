@@ -36,6 +36,7 @@ fn valid_project() -> Project {
         loop_region: None,
         automation: Vec::new(),
         tempo: Vec::new(),
+        patterns: Vec::new(),
         tracks: vec![Track {
             id: TrackId::new(),
             name: "Impact".into(),
@@ -51,6 +52,7 @@ fn valid_project() -> Project {
                     source_start_sample: 0,
                     duration_samples: 24_000,
                     notes: Vec::new(),
+                    pattern_id: None,
                     parameters: BTreeMap::from([
                         ("gain_db".into(), ParameterValue::Float(-3.0)),
                         ("muted".into(), ParameterValue::Bool(false)),

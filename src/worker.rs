@@ -480,6 +480,7 @@ mod tests {
             duration_samples: 4,
             parameters: std::collections::BTreeMap::new(),
             notes: Vec::new(),
+            pattern_id: None,
         };
         project.assets.push(asset);
         project.tracks[0].layers[0].clips.push(clip);

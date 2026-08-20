@@ -73,6 +73,7 @@ fn clip(asset_id: AssetId, start: u64, notes: Vec<ClipNote>) -> Clip {
         duration_samples: FRAMES,
         parameters: BTreeMap::from([("gain_db".into(), ParameterValue::Float(-3.0))]),
         notes,
+        pattern_id: None,
     }
 }
 
@@ -204,6 +205,7 @@ fn reference_project() -> Project {
         loop_region: None,
         automation: vec![automation],
         tempo: Vec::new(),
+        patterns: Vec::new(),
     }
 }
 

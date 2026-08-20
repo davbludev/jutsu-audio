@@ -41,6 +41,7 @@ fn builder() -> Builder {
             loop_region: None,
             automation: Vec::new(),
             tempo: Vec::new(),
+            patterns: Vec::new(),
             tracks: Vec::new(),
         },
         bus_id,
@@ -95,6 +96,7 @@ fn clip(asset_id: AssetId, start: u64, duration: u64, parameters: &[(&str, f64)]
         source_start_sample: 0,
         duration_samples: duration,
         notes: Vec::new(),
+        pattern_id: None,
         parameters: parameters
             .iter()
             .map(|(key, value)| ((*key).to_string(), ParameterValue::Float(*value)))

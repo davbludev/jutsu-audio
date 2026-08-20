@@ -58,6 +58,7 @@ entity_id!(BusId);
 entity_id!(MarkerId);
 entity_id!(AutomationId);
 entity_id!(EffectId);
+entity_id!(PatternId);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Project {
@@ -82,6 +83,22 @@ pub struct Project {
     /// in 4/4, which is what `TempoMap` returns for a project that has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tempo: Vec<TempoChange>,
+    /// Reusable note sequences. A clip can play one instead of holding its own
+    /// notes, so editing the pattern changes every clip that uses it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<Pattern>,
+}
+
+/// A named sequence of notes, played by any number of clips.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Pattern {
+    pub id: PatternId,
+    pub name: String,
+    /// How long one repeat lasts, in project frames. A clip longer than this
+    /// repeats the pattern; a clip shorter than it plays part of one.
+    pub length_frames: u64,
+    #[serde(default)]
+    pub notes: Vec<ClipNote>,
 }
 
 /// What a lane writes to. Named by entity ID, so a lane survives everything
@@ -281,6 +298,11 @@ impl Project {
             &mut diagnostics,
         );
         validate_unique_ids(
+            self.patterns.iter().map(|pattern| pattern.id),
+            "patterns",
+            &mut diagnostics,
+        );
+        validate_unique_ids(
             self.tracks
                 .iter()
                 .flat_map(|track| &track.effects)
@@ -398,6 +420,16 @@ impl Project {
                             format!("{path}.id"),
                             Some(clip.id.to_string()),
                             "duplicate clip ID in track",
+                        ));
+                    }
+                    if let Some(pattern_id) = clip.pattern_id
+                        && !self.patterns.iter().any(|pattern| pattern.id == pattern_id)
+                    {
+                        diagnostics.push(ValidationDiagnostic::new(
+                            ValidationCode::MissingPatternReference,
+                            format!("{path}.pattern_id"),
+                            Some(clip.id.to_string()),
+                            format!("pattern {pattern_id} does not exist"),
                         ));
                     }
                     if !asset_ids.contains(&clip.asset_id) {
@@ -566,6 +598,56 @@ pub struct Clip {
     /// file when empty, so nothing about existing projects changes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<ClipNote>,
+    /// A pattern to play instead of `notes`, repeating for the clip's length.
+    /// The clip's own notes win when it has any, so a pattern can be replaced
+    /// by a one-off edit without unlinking it first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_id: Option<PatternId>,
+}
+
+impl Clip {
+    /// The notes this clip plays, in clip-relative frames.
+    ///
+    /// Its own notes when it has any; otherwise the pattern's, repeated to fill
+    /// the clip. Repeating is what makes a pattern a loop rather than a
+    /// one-shot, and it happens here so playback and export cannot disagree.
+    #[must_use]
+    pub fn resolved_notes(&self, patterns: &[Pattern]) -> Vec<ClipNote> {
+        if !self.notes.is_empty() {
+            return self.notes.clone();
+        }
+        let Some(pattern) = self
+            .pattern_id
+            .and_then(|id| patterns.iter().find(|pattern| pattern.id == id))
+        else {
+            return Vec::new();
+        };
+        if pattern.length_frames == 0 || pattern.notes.is_empty() {
+            return pattern.notes.clone();
+        }
+
+        let mut notes = Vec::new();
+        let mut offset = 0_u64;
+        while offset < self.duration_samples {
+            for note in &pattern.notes {
+                let start = offset.saturating_add(note.start_frame);
+                if start >= self.duration_samples {
+                    continue;
+                }
+                notes.push(ClipNote {
+                    start_frame: start,
+                    // A note that would run past the clip is cut at its end
+                    // rather than dropped: half a note is what you hear.
+                    duration_frames: note
+                        .duration_frames
+                        .min(self.duration_samples.saturating_sub(start)),
+                    ..*note
+                });
+            }
+            offset = offset.saturating_add(pattern.length_frames);
+        }
+        notes
+    }
 }
 
 /// One note inside a clip. Times are frames from the clip's own start, so
@@ -611,6 +693,7 @@ pub enum ValidationCode {
     BusCycle,
     UnorderedAutomation,
     MissingAutomationTarget,
+    MissingPatternReference,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

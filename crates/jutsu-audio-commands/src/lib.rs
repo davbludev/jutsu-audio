@@ -3,8 +3,8 @@ use std::fmt;
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, AutomationId, AutomationLane, Breakpoint, BusId, Clip,
     ClipId, ClipNote, EffectId, EffectInsert, Layer, LayerId, LoopRegion, Marker, MarkerId,
-    MixerBus, ParameterValue, Pattern, PatternId, Project, TempoChange, Track, TrackId,
-    ValidationDiagnostic,
+    MixerBus, ParameterValue, Pattern, PatternId, Project, SamplerZone, TempoChange, Track,
+    TrackId, ValidationDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -234,6 +234,12 @@ pub enum ProjectCommand {
     SetClipPattern {
         clip_id: ClipId,
         pattern_id: Option<PatternId>,
+    },
+    /// Replaces a sampler's mapping. One command, so remapping an instrument is
+    /// one undo step.
+    SetSamplerZones {
+        asset_id: AssetId,
+        zones: Vec<SamplerZone>,
     },
 }
 
@@ -1068,6 +1074,33 @@ pub(crate) fn apply_command(
                 kind: ChangeKind::Updated,
                 entity_kind: EntityKind::Clip,
                 entity_id: clip_id.to_string(),
+            }
+        }
+        ProjectCommand::SetSamplerZones { asset_id, zones } => {
+            let asset = project
+                .assets
+                .iter_mut()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("asset {asset_id} does not exist"),
+                    )
+                })?;
+            let AudioAssetSource::Sampler { zones: stored, .. } = &mut asset.source else {
+                return Err(CommandError::at_command(
+                    CommandErrorCode::EntityNotFound,
+                    command_index,
+                    format!("asset {asset_id} is not a sampler"),
+                ));
+            };
+            stored.clone_from(zones);
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Asset,
+                entity_id: asset_id.to_string(),
             }
         }
         ProjectCommand::RemoveClip { clip_id } => {

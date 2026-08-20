@@ -171,6 +171,7 @@ pub fn mix_project_metered(
                 extensions,
                 sample_rate,
                 &mut load,
+                &mut diagnostics,
             )?;
         }
         // Inserts first, then the strip: a fader move should change how loud
@@ -320,6 +321,7 @@ fn depth_to_output(project: &Project, start: BusId) -> usize {
 }
 
 /// Renders one clip into a buffer, from a file or from an extension.
+#[allow(clippy::too_many_arguments)]
 fn render_one_clip(
     buffer: &mut [f32],
     total_frames: usize,
@@ -328,13 +330,22 @@ fn render_one_clip(
     extensions: &ExtensionRegistries,
     sample_rate: u32,
     load: &mut impl FnMut(AssetId) -> Result<SourceAudio, String>,
+    diagnostics: &mut Vec<MixDiagnostic>,
 ) -> Result<(), MixError> {
     match rendered_source(project, clip) {
         Some(source) => {
             // A clip playing a pattern has its notes resolved here, so the
             // synth sees one flat list however they were written.
             let notes = clip.resolved_notes(&project.patterns);
-            let source = render_extension_clip(extensions, source, clip, &notes, sample_rate)?;
+            let source = render_extension_clip(
+                extensions,
+                source,
+                clip,
+                &notes,
+                sample_rate,
+                load,
+                diagnostics,
+            )?;
             // The rendered buffer *is* the clip, so it is read from its start
             // rather than from the clip's source offset.
             let mut placed = clip.clone();
@@ -449,7 +460,9 @@ fn rendered_source<'a>(project: &'a Project, clip: &Clip) -> Option<&'a AudioAss
         .find(|asset| asset.id == clip.asset_id)?;
     matches!(
         asset.source,
-        AudioAssetSource::Synth { .. } | AudioAssetSource::Generated { .. }
+        AudioAssetSource::Synth { .. }
+            | AudioAssetSource::Generated { .. }
+            | AudioAssetSource::Sampler { .. }
     )
     .then_some(&asset.source)
 }
@@ -461,12 +474,15 @@ fn rendered_source<'a>(project: &'a Project, clip: &Clip) -> Option<&'a AudioAss
 ///
 /// ponytail: a generator is re-run on every mix rather than cached. Fine for
 /// one-shots; cache by recipe identity if long ambiences make a re-mix drag.
+#[allow(clippy::too_many_arguments)]
 fn render_extension_clip(
     extensions: &ExtensionRegistries,
     source: &AudioAssetSource,
     clip: &Clip,
     notes: &[jutsu_audio_model::ClipNote],
     sample_rate: u32,
+    load: &mut impl FnMut(AssetId) -> Result<SourceAudio, String>,
+    diagnostics: &mut Vec<MixDiagnostic>,
 ) -> Result<SourceAudio, MixError> {
     let frames = usize::try_from(clip.duration_samples).map_err(|_| {
         MixError::new(
@@ -480,6 +496,30 @@ fn render_extension_clip(
             parameters,
             ..
         } => (type_id, parameters),
+        AudioAssetSource::Sampler {
+            zones,
+            attack_ms,
+            release_ms,
+            max_voices,
+        } => {
+            let samples = crate::sampler::render(
+                zones,
+                notes,
+                frames,
+                sample_rate,
+                *attack_ms,
+                *release_ms,
+                *max_voices,
+                &clip.id.to_string(),
+                load,
+                diagnostics,
+            );
+            return Ok(SourceAudio {
+                sample_rate,
+                channels: 1,
+                samples: Arc::from(samples),
+            });
+        }
         AudioAssetSource::Generated {
             generator_type,
             seed,

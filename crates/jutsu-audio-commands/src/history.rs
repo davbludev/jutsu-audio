@@ -470,6 +470,20 @@ fn invert_command(
                 pattern_id: clip.pattern_id,
             }
         }
+        ProjectCommand::SetSamplerZones { asset_id, .. } => {
+            let asset = project
+                .assets
+                .iter()
+                .find(|asset| asset.id == *asset_id)
+                .ok_or_else(|| missing(format!("asset {asset_id} does not exist")))?;
+            let jutsu_audio_model::AudioAssetSource::Sampler { zones, .. } = &asset.source else {
+                return Err(missing(format!("asset {asset_id} is not a sampler")));
+            };
+            ProjectCommand::SetSamplerZones {
+                asset_id: *asset_id,
+                zones: zones.clone(),
+            }
+        }
         ProjectCommand::UpdateClip { clip_id, .. } => {
             let (_, _, clip) = find_clip(project, *clip_id)
                 .ok_or_else(|| missing(format!("clip {clip_id} does not exist")))?;

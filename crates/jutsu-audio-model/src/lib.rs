@@ -522,6 +522,22 @@ pub enum AudioAssetSource {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         parameters: BTreeMap<String, ParameterValue>,
     },
+    /// A sampler: notes played from the project's own samples, mapped across
+    /// pitch and velocity. Like a synth, the clips referencing it carry the
+    /// notes; unlike one, what it plays is audio the project already holds.
+    Sampler {
+        #[serde(default)]
+        zones: Vec<SamplerZone>,
+        /// Attack and release for every voice, in milliseconds.
+        #[serde(default)]
+        attack_ms: f64,
+        #[serde(default = "default_release_ms")]
+        release_ms: f64,
+        /// How many notes sound at once. A new note past the limit steals the
+        /// quietest voice.
+        #[serde(default = "default_max_voices")]
+        max_voices: u32,
+    },
     /// A synthesizer rather than a file: the clips referencing it carry the
     /// notes, and this carries what plays them.
     Synth {
@@ -532,6 +548,72 @@ pub enum AudioAssetSource {
         #[serde(default)]
         parameters: BTreeMap<String, ParameterValue>,
     },
+}
+
+const fn default_release_ms() -> f64 {
+    80.0
+}
+
+const fn default_max_voices() -> u32 {
+    16
+}
+
+/// One sample mapped across a range of pitches and velocities.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SamplerZone {
+    pub asset_id: AssetId,
+    /// The pitch this sample was recorded at. A note away from it is played
+    /// faster or slower by the ratio between them.
+    pub root_pitch_hz: f64,
+    /// The pitch range this zone answers for, inclusive.
+    pub low_pitch_hz: f64,
+    pub high_pitch_hz: f64,
+    /// The velocity range this zone answers for, inclusive. Layers of the same
+    /// pitch range at different velocities are how a kit gets its dynamics.
+    #[serde(default)]
+    pub low_velocity: f32,
+    #[serde(default = "full_velocity")]
+    pub high_velocity: f32,
+    #[serde(default)]
+    pub gain_db: f64,
+    #[serde(default)]
+    pub loop_mode: SampleLoopMode,
+}
+
+const fn full_velocity() -> f32 {
+    1.0
+}
+
+/// What a zone does when it reaches the end of its sample.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SampleLoopMode {
+    /// Play once and stop. What a drum does.
+    #[default]
+    OneShot,
+    /// Repeat a span of the source for as long as the note is held. What a
+    /// sustained instrument does.
+    Loop { start_frame: u64, end_frame: u64 },
+}
+
+impl SamplerZone {
+    /// Whether this zone answers for a note.
+    #[must_use]
+    pub fn covers(&self, pitch_hz: f64, velocity: f32) -> bool {
+        pitch_hz >= self.low_pitch_hz
+            && pitch_hz <= self.high_pitch_hz
+            && velocity >= self.low_velocity
+            && velocity <= self.high_velocity
+    }
+
+    /// How much faster the sample plays for a note: 2.0 is an octave up.
+    #[must_use]
+    pub fn playback_ratio(&self, pitch_hz: f64) -> f64 {
+        if self.root_pitch_hz <= 0.0 {
+            return 1.0;
+        }
+        (pitch_hz / self.root_pitch_hz).clamp(0.03125, 32.0)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

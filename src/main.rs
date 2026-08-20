@@ -1900,6 +1900,9 @@ impl JutsuAudioApp {
                                 (0, generator_type.clone())
                             }
                             AudioAssetSource::Synth { type_id, .. } => (0, type_id.clone()),
+                            AudioAssetSource::Sampler { zones, .. } => {
+                                (0, format!("sampler · {} zones", zones.len()))
+                            }
                         };
                         AssetRow {
                             id: asset.id,

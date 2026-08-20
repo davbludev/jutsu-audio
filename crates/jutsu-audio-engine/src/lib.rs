@@ -9,6 +9,7 @@ use jutsu_audio_model::{AssetId, BusId, ClipId, LoopRegion, ParameterValue, Proj
 
 pub mod effects;
 pub mod mixdown;
+pub mod sampler;
 
 pub use effects::{ChainTiming, MixDiagnostic, MixDiagnosticCode};
 pub use mixdown::{

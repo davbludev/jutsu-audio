@@ -430,7 +430,9 @@ pub fn resolve_asset_path(project_path: &Path, source: &AudioAssetSource) -> Opt
         AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
         // Neither has a file to read: a generated asset is rendered, and a
         // synth is played from the notes on its clips.
-        AudioAssetSource::Generated { .. } | AudioAssetSource::Synth { .. } => return None,
+        AudioAssetSource::Generated { .. }
+        | AudioAssetSource::Synth { .. }
+        | AudioAssetSource::Sampler { .. } => return None,
     };
     Some(
         project_path

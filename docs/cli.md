@@ -153,3 +153,16 @@ sense that undo puts back exactly what was there:
 - `humanise_clip` nudges timing and velocity by a bounded amount from an explicit `seed` — the
   same seed always gives the same result, so a humanised part is still reproducible;
 - `loop_clip_notes` repeats a clip's notes at a fixed period.
+
+## Samplers
+
+`add_sampler` creates an instrument from a mapping of the project's own samples; `set_sampler_zones`
+replaces that mapping in one command. A zone is an asset plus its `root_pitch_hz` and the pitch and
+velocity range it answers for; ranges default to everything, so a one-sample instrument needs only
+the asset and its root pitch. `loop_start_frame` and `loop_end_frame` together make a zone loop for
+as long as its note is held; without them it plays once.
+
+A clip plays a sampler exactly as it plays a synth: the clip carries the notes, through
+`add_synth_clip`-style notes or a pattern. A zone whose asset cannot be read plays silence and
+reports it rather than failing the mix, and a zone naming an asset the project does not have is
+refused before anything is stored.

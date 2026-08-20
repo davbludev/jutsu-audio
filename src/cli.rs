@@ -12,7 +12,7 @@ use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, AutomationId, AutomationTarget, Breakpoint, BusId, Clip, ClipId,
     ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
-    ParameterValue, PatternId, Project, TempoChange, Track, TrackId,
+    ParameterValue, PatternId, Project, SampleLoopMode, SamplerZone, TempoChange, Track, TrackId,
 };
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
@@ -269,6 +269,25 @@ enum Request {
     },
     /// The parameters every track and bus strip has.
     DescribeStrip { protocol_version: u32 },
+    /// Creates a sampler instrument from a mapping of the project's samples.
+    AddSampler {
+        protocol_version: u32,
+        path: PathBuf,
+        name: String,
+        zones: Vec<CliZone>,
+        #[serde(default)]
+        attack_ms: f64,
+        #[serde(default = "default_release_ms")]
+        release_ms: f64,
+        #[serde(default = "default_max_voices")]
+        max_voices: u32,
+    },
+    SetSamplerZones {
+        protocol_version: u32,
+        path: PathBuf,
+        asset_id: AssetId,
+        zones: Vec<CliZone>,
+    },
     AddPattern {
         protocol_version: u32,
         path: PathBuf,
@@ -447,6 +466,66 @@ impl From<CliEffectTarget> for EffectTarget {
         match target {
             CliEffectTarget::Track { track_id } => Self::Track { track_id },
             CliEffectTarget::Bus { bus_id } => Self::Bus { bus_id },
+        }
+    }
+}
+
+/// One sampler zone as a caller writes it. Ranges default to "everything", so
+/// a single-sample instrument needs only an asset and its root pitch.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliZone {
+    pub asset_id: AssetId,
+    pub root_pitch_hz: f64,
+    #[serde(default = "lowest_pitch")]
+    pub low_pitch_hz: f64,
+    #[serde(default = "highest_pitch")]
+    pub high_pitch_hz: f64,
+    #[serde(default)]
+    pub low_velocity: f32,
+    #[serde(default = "full_velocity")]
+    pub high_velocity: f32,
+    #[serde(default)]
+    pub gain_db: f64,
+    /// Loop points in source frames. Absent means the zone plays once.
+    #[serde(default)]
+    pub loop_start_frame: Option<u64>,
+    #[serde(default)]
+    pub loop_end_frame: Option<u64>,
+}
+
+const fn lowest_pitch() -> f64 {
+    8.0
+}
+
+const fn highest_pitch() -> f64 {
+    20_000.0
+}
+
+const fn default_release_ms() -> f64 {
+    80.0
+}
+
+const fn default_max_voices() -> u32 {
+    16
+}
+
+impl From<CliZone> for SamplerZone {
+    fn from(zone: CliZone) -> Self {
+        Self {
+            asset_id: zone.asset_id,
+            root_pitch_hz: zone.root_pitch_hz,
+            low_pitch_hz: zone.low_pitch_hz,
+            high_pitch_hz: zone.high_pitch_hz,
+            low_velocity: zone.low_velocity,
+            high_velocity: zone.high_velocity,
+            gain_db: zone.gain_db,
+            loop_mode: match (zone.loop_start_frame, zone.loop_end_frame) {
+                (Some(start_frame), Some(end_frame)) => SampleLoopMode::Loop {
+                    start_frame,
+                    end_frame,
+                },
+                _ => SampleLoopMode::OneShot,
+            },
         }
     }
 }
@@ -734,6 +813,12 @@ impl Request {
                 protocol_version, ..
             }
             | Self::LoopClipNotes {
+                protocol_version, ..
+            } => *protocol_version,
+            Self::AddSampler {
+                protocol_version, ..
+            }
+            | Self::SetSamplerZones {
                 protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
@@ -1856,6 +1941,52 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 json!({"type": "clip_notes_looped", "clip_id": clip_id, "repeats": repeats, "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
+        Request::AddSampler {
+            path,
+            name,
+            zones,
+            attack_ms,
+            release_ms,
+            max_voices,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let zones: Vec<SamplerZone> = zones.into_iter().map(SamplerZone::from).collect();
+            check_zones(&project, &zones)?;
+            let asset = jutsu_audio_model::Asset {
+                id: AssetId::new(),
+                name,
+                source: AudioAssetSource::Sampler {
+                    zones,
+                    attack_ms,
+                    release_ms,
+                    max_voices,
+                },
+            };
+            let asset_id = asset.id;
+            let applied = cli_session::apply(&path, vec![ProjectCommand::AddAsset { asset }])?;
+            Ok(
+                json!({"type": "sampler_added", "asset_id": asset_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetSamplerZones {
+            path,
+            asset_id,
+            zones,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let zones: Vec<SamplerZone> = zones.into_iter().map(SamplerZone::from).collect();
+            check_zones(&project, &zones)?;
+            let count = zones.len();
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetSamplerZones { asset_id, zones }],
+            )?;
+            Ok(
+                json!({"type": "sampler_zones_set", "asset_id": asset_id, "zone_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
         Request::SessionStatus { path, .. } => {
             let live = cli_session::status(&path)?;
             Ok(match live {
@@ -1900,7 +2031,11 @@ fn build_master_snapshot(
     for asset in &project.assets {
         let path = match &asset.source {
             AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
-            AudioAssetSource::Generated { .. } | AudioAssetSource::Synth { .. } => continue,
+            // Rendered rather than read: a generator runs, a synth is played,
+            // and a sampler plays the project's other assets.
+            AudioAssetSource::Generated { .. }
+            | AudioAssetSource::Synth { .. }
+            | AudioAssetSource::Sampler { .. } => continue,
         };
         let Ok((metadata, samples)) =
             AssetManager::decode_wav_samples(project_directory.join(path))
@@ -1969,4 +2104,42 @@ fn project_sample_rate(project: &Project) -> u32 {
             _ => None,
         })
         .unwrap_or(48_000)
+}
+
+/// Checks a sampler mapping before it is stored: every zone must name an asset
+/// the project has, and cover a range that can match something.
+fn check_zones(
+    project: &Project,
+    zones: &[SamplerZone],
+) -> Result<(), (i32, &'static str, String)> {
+    for zone in zones {
+        if !project.assets.iter().any(|asset| asset.id == zone.asset_id) {
+            return Err((
+                4,
+                "command_failed",
+                format!(
+                    "sampler zone names asset {} which does not exist",
+                    zone.asset_id
+                ),
+            ));
+        }
+        if zone.high_pitch_hz < zone.low_pitch_hz || zone.high_velocity < zone.low_velocity {
+            return Err((
+                6,
+                "invalid_parameter",
+                format!(
+                    "sampler zone for asset {} has a range that covers nothing",
+                    zone.asset_id
+                ),
+            ));
+        }
+        if zone.root_pitch_hz <= 0.0 {
+            return Err((
+                6,
+                "invalid_parameter",
+                "a sampler zone needs a positive root pitch".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }

@@ -200,16 +200,22 @@ fn strip_frame(ui: &mut egui::Ui, title: &str, level: f32, contents: impl FnOnce
         .corner_radius(theme::RADIUS)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            ui.set_width(STRIP_WIDTH);
-            ui.label(
-                RichText::new(theme::elide(title, STRIP_WIDTH))
-                    .size(11.0)
-                    .color(theme::TEXT),
-            );
-            ui.add_space(4.0);
-            meter(ui, level);
-            ui.add_space(6.0);
-            contents(ui);
+            // The rack lays strips out side by side, so the frame inherits a
+            // horizontal layout. Without this the strip's own rows — title,
+            // meter, fader, routing — would run across the screen instead of
+            // down the strip, and land on top of each other.
+            ui.vertical(|ui| {
+                ui.set_width(STRIP_WIDTH);
+                ui.label(
+                    RichText::new(theme::elide(title, STRIP_WIDTH))
+                        .size(11.0)
+                        .color(theme::TEXT),
+                );
+                ui.add_space(4.0);
+                meter(ui, level);
+                ui.add_space(6.0);
+                contents(ui);
+            });
         });
     ui.add_space(6.0);
 }

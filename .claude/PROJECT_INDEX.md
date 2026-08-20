@@ -42,6 +42,8 @@ it has moved.
 - `xtask/src/package.rs` + `smoke.rs` — `cargo package-release` builds a release directory
   (binaries, docs, generated INSTALL/notices/SHA256SUMS); `cargo smoke <dir>` runs the packaged
   binaries like a user would. Process and platform list: `docs/release.md`.
+- `src/ui_harness.rs` — test-only headless egui harness: runs panels, injects keys and clicks,
+  and reads back laid-out text. `Frame::position_of` is how a test clicks a control by its label.
 - `src/contrast.rs` — WCAG ratio maths plus the table of foreground/background pairs the theme
   actually draws. Adding a palette colour means adding it to `PAIRS` there.
 - `src/shortcuts_help.rs` — the keyboard reference overlay and `step_selection`, the Tab walk

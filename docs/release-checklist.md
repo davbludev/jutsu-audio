@@ -25,7 +25,7 @@ focus order is egui's default rather than a designed one.
 | What | Evidence |
 | --- | --- |
 | Screen-reader metadata is published | AccessKit, through eframe — every widget is built from egui primitives that carry their own accessible name |
-| Controls carry text, not only glyphs | mixer strips, transport and inspector build from `theme::flat_button` and `RichText` labels |
+| Controls carry text, not only glyphs | mixer strips, transport and inspector build from `theme::flat_button` and `RichText` labels; `ui_harness::tests` reads back the text actually laid out and asserts on it |
 | Non-obvious controls explain themselves on hover | `on_hover_text` on the mute/solo chips, the audio-device status, the recovery choices |
 | Meaning is never carried by colour alone | mute and solo read `M`/`S`; the audio status reads `no audio device`; diagnostics are words |
 | Every foreground the interface draws clears WCAG 2.1 AA on the surface it lands on | `contrast::tests::every_colour_the_interface_draws_meets_its_threshold`, over the pairs in `src/contrast.rs` |
@@ -71,8 +71,12 @@ crash immediately after a *manual* discard has nothing to offer back.
 | A refused edit mid-workflow leaves the project alone | `a_refused_edit_in_the_middle_of_the_workflow_leaves_the_project_alone` |
 | Generated SFX are reproducible across runs and machines | `a_golden_seed_previews_identically_every_run`, `a_generated_clip_is_audible_in_an_export_and_stays_the_same_across_exports` |
 
-**Limits.** Both workflows are driven through the CLI and the session host, which is what the
-GUI calls — but no automated test drives the GUI's own widgets.
+| No panel draws one label on top of another | `ui_harness::Frame::overlaps`, asserted for the mixer — the check that caught `tasks/bugs/B02` |
+| The panels themselves draw and respond | `ui_harness::tests` — the timeline labels its tracks and clips and selects the clip that is clicked, the mixer draws a strip per track and asks for a bus when its button is clicked, and each modal says what it is for |
+
+**Limits.** The transport and the inspector are drawn inside `JutsuAudioApp` rather than in a
+panel function, so the harness cannot reach them without restructuring `main.rs`; they are
+covered only through the state they change.
 
 ## CLI and GUI live together
 

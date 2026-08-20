@@ -16,6 +16,9 @@ mod shortcuts_help;
 mod synth_panel;
 mod theme;
 mod timeline;
+// Runs the panels headlessly so what a user sees can be asserted.
+#[cfg(test)]
+mod ui_harness;
 mod worker;
 
 use std::collections::{BTreeMap, HashMap};

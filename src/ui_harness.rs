@@ -207,6 +207,28 @@ impl Harness {
         (frame, produced)
     }
 
+    /// A panel pinned to the right at a fixed width, the way the inspector is
+    /// hosted. The width matters for the same reason the rack's height does: a
+    /// panel given the whole window never discovers that its rows do not fit
+    /// the column it actually lives in.
+    pub fn side_panel<T>(
+        &mut self,
+        width: f32,
+        build: impl FnMut(&mut egui::Ui) -> T,
+    ) -> (Frame, Option<T>) {
+        let mut build = build;
+        let mut produced = None;
+        let frame = self.settle(|context| {
+            egui::SidePanel::right("harness-side")
+                .resizable(false)
+                .exact_width(width)
+                .show(context, |ui| {
+                    produced = Some(build(ui));
+                });
+        });
+        (frame, produced)
+    }
+
     /// Runs the interface until its layout has settled, and returns the last
     /// frame. Two passes: the first creates the widgets, the second draws them
     /// at the size the first worked out.
@@ -487,6 +509,7 @@ mod tests {
                     parameters: std::collections::BTreeMap::new(),
                     enabled: true,
                     wet: 1.0,
+                    sidechain: None,
                 });
         }
         let meters = jutsu_audio_engine::Meters::default();

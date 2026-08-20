@@ -55,6 +55,7 @@ fn effect(type_id: &str) -> EffectInsert {
         parameters: BTreeMap::new(),
         enabled: true,
         wet: 0.5,
+        sidechain: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn project(tracks: usize, synth_tracks: usize, notes_per_track: usize) -> Projec
             id: TrackId::new(),
             name: format!("Sample {index}"),
             output_bus_id: group,
+            sends: Vec::new(),
             parameters: BTreeMap::from([("gain_db".into(), ParameterValue::Float(-6.0))]),
             layers: vec![Layer {
                 id: LayerId::new(),
@@ -119,6 +121,7 @@ fn project(tracks: usize, synth_tracks: usize, notes_per_track: usize) -> Projec
             id: TrackId::new(),
             name: format!("Synth {index}"),
             output_bus_id: group,
+            sends: Vec::new(),
             parameters: BTreeMap::new(),
             layers: vec![Layer {
                 id: LayerId::new(),

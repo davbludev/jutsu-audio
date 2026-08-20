@@ -150,6 +150,7 @@ impl ProjectStore {
                 id: TrackId::new(),
                 name: "Track 1".into(),
                 output_bus_id: master_bus_id,
+                sends: Vec::new(),
                 parameters: BTreeMap::new(),
                 layers: vec![Layer {
                     id: LayerId::new(),
@@ -202,6 +203,12 @@ impl ProjectStore {
         let migrated_from =
             (schema_version < CURRENT_PROJECT_SCHEMA_VERSION).then_some(schema_version);
         if schema_version == 0 {
+            value["schema_version"] = Value::from(CURRENT_PROJECT_SCHEMA_VERSION);
+        } else if schema_version == 1 {
+            // 1 → 2 added `AutomationTarget::Effect`, `EffectInsert::sidechain`
+            // and strip sends. Every one of them is optional and defaulted, so
+            // a version 1 document is already a valid version 2 document and
+            // the migration is the version stamp itself.
             value["schema_version"] = Value::from(CURRENT_PROJECT_SCHEMA_VERSION);
         } else if schema_version != CURRENT_PROJECT_SCHEMA_VERSION {
             return Err(ProjectFileError::new(

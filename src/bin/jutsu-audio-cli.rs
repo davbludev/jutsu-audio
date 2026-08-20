@@ -8,7 +8,14 @@ const USAGE: &str = "jutsu-audio-cli — one JSON request on stdin, one JSON res
     echo '{\"protocol_version\":1,\"operation\":\"describe_protocol\"}' | jutsu-audio-cli
 
 describe_protocol lists every operation this build accepts. Full documentation:
-docs/cli.md, shipped beside this binary.";
+docs/cli.md, shipped beside this binary.
+
+    jutsu-audio-cli --mcp
+
+serves the same operations over the Model Context Protocol on stdin and stdout,
+for an agent that keeps the connection open. Register it once:
+
+    claude mcp add --scope user jutsu-audio -- <this binary> --mcp";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -17,6 +24,7 @@ fn main() {
             println!("jutsu-audio-cli {}", env!("CARGO_PKG_VERSION"));
         }
         Some("--help" | "-h") => println!("{USAGE}"),
+        Some("--mcp") => serve_mcp(),
         Some(unknown) => {
             // Not a JSON error envelope: this is a shell mistake, not a
             // protocol one, and a person is reading it.
@@ -36,4 +44,15 @@ fn run() {
     let (exit_code, response) = jutsu_audio::cli::execute_json(&input);
     println!("{response}");
     std::process::exit(exit_code);
+}
+
+/// The long-lived mode: MCP over stdin and stdout, until the client hangs up.
+/// Errors go to stderr, because stdout is the protocol.
+fn serve_mcp() {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    if let Err(error) = jutsu_audio::mcp::serve(stdin.lock(), stdout.lock()) {
+        eprintln!("jutsu-audio-cli --mcp: {error}");
+        std::process::exit(1);
+    }
 }

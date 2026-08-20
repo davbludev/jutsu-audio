@@ -876,3 +876,274 @@ fn write_test_wav(path: &std::path::Path) {
     }
     writer.finalize().unwrap();
 }
+
+/// The command engine has always been able to remove a track; for a while the
+/// machine surface could not, which meant a script could build a project it
+/// could not take apart.
+#[test]
+fn a_removed_track_takes_its_clips_with_it_and_leaves_the_rest() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("strip.jutsu-audio.json");
+    let (_, created) = invoke(json!({"protocol_version": 1, "operation": "create_project",
+                                     "path": path, "name": "Strip"}));
+    let kept = created["result"]["track_id"].clone();
+
+    let (_, added) = invoke(json!({"protocol_version": 1, "operation": "add_track",
+                                   "path": path, "name": "Doomed"}));
+    let doomed = added["result"]["track_id"].clone();
+    invoke(
+        json!({"protocol_version": 1, "operation": "add_synth_clip", "path": path,
+                  "track_id": doomed, "layer_id": added["result"]["layer_id"],
+                  "type_id": "builtin.oscillator", "start_sample": 0,
+                  "duration_samples": 48_000}),
+    );
+
+    let (code, removed) = invoke(json!({"protocol_version": 1, "operation": "remove_track",
+                                        "path": path, "track_id": doomed}));
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(removed["result"]["type"], "track_removed");
+
+    let (_, inspected) = invoke(
+        json!({"protocol_version": 1, "operation": "inspect_project",
+                                       "path": path}),
+    );
+    let tracks = inspected["result"]["project"]["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1, "{tracks:?}");
+    assert_eq!(tracks[0]["id"], kept);
+
+    // Naming a track that is gone is refused rather than silently accepted.
+    let (code, refused) = invoke(json!({"protocol_version": 1, "operation": "remove_track",
+                                        "path": path, "track_id": doomed}));
+    assert_eq!(code, 4, "{refused}");
+}
+
+/// Stems: one file per track, from the same render the master comes out of.
+/// The check that matters is that they add back up — a stem set that does not
+/// sum to the mix is a set of files nobody can use.
+#[test]
+fn stems_are_written_per_track_and_sum_back_to_the_master() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("stems.jutsu-audio.json");
+    let (_, created) = invoke(json!({"protocol_version": 1, "operation": "create_project",
+                                     "path": path, "name": "Stems"}));
+    let first = created["result"].clone();
+    let (_, second) = invoke(json!({"protocol_version": 1, "operation": "add_track",
+                                    "path": path, "name": "Second voice"}));
+
+    for (track, layer, pitch) in [
+        (first["track_id"].clone(), first["layer_id"].clone(), 220.0),
+        (
+            second["result"]["track_id"].clone(),
+            second["result"]["layer_id"].clone(),
+            330.0,
+        ),
+    ] {
+        // Well under full scale each: the exported master is clamped at ±1, and
+        // two loud voices would clip the sum, which would make this a test
+        // about clipping rather than about stems.
+        invoke(
+            json!({"protocol_version": 1, "operation": "set_track_parameter", "path": path,
+                      "track_id": track, "key": "gain_db",
+                      "value": {"type": "float", "value": -12.0}}),
+        );
+        invoke(
+            json!({"protocol_version": 1, "operation": "add_synth_clip", "path": path,
+                      "track_id": track, "layer_id": layer, "type_id": "builtin.oscillator",
+                      "start_sample": 0, "duration_samples": 24_000,
+                      "notes": [{"start_frame": 0, "duration_frames": 24_000,
+                                 "pitch_hz": pitch, "velocity": 0.8}]}),
+        );
+    }
+
+    let stems_directory = directory.path().join("stems");
+    let (code, exported) = invoke(json!({"protocol_version": 1, "operation": "export_stems",
+                                         "path": path, "directory": stems_directory,
+                                         "encoding": "float32"}));
+    assert_eq!(code, 0, "{exported}");
+    let stems = exported["result"]["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2, "{exported}");
+    assert!(stems[1]["name"].as_str().unwrap().contains("Second"));
+    // Named for the track, not for its index alone.
+    assert!(
+        stems[1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("second-voice"),
+        "{}",
+        stems[1]["output"]
+    );
+
+    let master = directory.path().join("master.wav");
+    invoke(
+        json!({"protocol_version": 1, "operation": "export_wav", "path": path,
+                  "output": master, "encoding": "float32"}),
+    );
+
+    let read = |file: &std::path::Path| -> Vec<f32> {
+        hound::WavReader::open(file)
+            .unwrap()
+            .into_samples::<f32>()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let mixed = read(&master);
+    let summed: Vec<f32> = stems
+        .iter()
+        .map(|stem| read(std::path::Path::new(stem["output"].as_str().unwrap())))
+        .fold(vec![0.0_f32; mixed.len()], |mut total, stem| {
+            for (slot, sample) in total.iter_mut().zip(stem) {
+                *slot += sample;
+            }
+            total
+        });
+
+    assert_eq!(summed.len(), mixed.len());
+    for (index, (stem_sum, master_sample)) in summed.iter().zip(&mixed).enumerate() {
+        assert!(
+            (stem_sum - master_sample).abs() < 1e-6,
+            "stems and master part company at sample {index}: {stem_sum} against {master_sample}"
+        );
+    }
+}
+
+/// A loop lives in the project; the file it exports has to carry it too, or
+/// the loop stops existing the moment the audio leaves the editor.
+#[test]
+fn an_exported_wav_carries_the_projects_loop_points() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("looped.jutsu-audio.json");
+    let (_, created) = invoke(json!({"protocol_version": 1, "operation": "create_project",
+                                     "path": path, "name": "Looped"}));
+    invoke(
+        json!({"protocol_version": 1, "operation": "add_synth_clip", "path": path,
+                  "track_id": created["result"]["track_id"],
+                  "layer_id": created["result"]["layer_id"],
+                  "type_id": "builtin.oscillator", "start_sample": 0,
+                  "duration_samples": 48_000,
+                  "notes": [{"start_frame": 0, "duration_frames": 48_000,
+                             "pitch_hz": 220.0, "velocity": 0.5}]}),
+    );
+    invoke(
+        json!({"protocol_version": 1, "operation": "set_loop_region", "path": path,
+                  "start_frame": 12_000, "end_frame": 36_000}),
+    );
+
+    let output = directory.path().join("looped.wav");
+    let (code, exported) = invoke(json!({"protocol_version": 1, "operation": "export_wav",
+                                         "path": path, "output": output,
+                                         "encoding": "pcm16"}));
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(exported["result"]["loop_points"]["start_frame"], 12_000);
+    assert_eq!(exported["result"]["loop_points"]["end_frame"], 36_000);
+
+    // Read back out of the file itself, not out of the response: the response
+    // could say anything.
+    assert_eq!(
+        jutsu_audio_engine::read_loop_points(&output),
+        Some((12_000, 36_000))
+    );
+
+    // And the file is still an ordinary WAV that any reader opens.
+    let reader = hound::WavReader::open(&output).unwrap();
+    assert_eq!(reader.spec().sample_rate, 48_000);
+    assert_eq!(reader.len() as u64 / 2, 48_000);
+}
+
+/// Exporting the loop itself makes the whole file the loop, which is what a
+/// game engine wants from a file it is going to loop forever.
+#[test]
+fn exporting_the_loop_region_marks_the_whole_file_as_the_loop() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("region.jutsu-audio.json");
+    let (_, created) = invoke(json!({"protocol_version": 1, "operation": "create_project",
+                                     "path": path, "name": "Region"}));
+    invoke(
+        json!({"protocol_version": 1, "operation": "add_synth_clip", "path": path,
+                  "track_id": created["result"]["track_id"],
+                  "layer_id": created["result"]["layer_id"],
+                  "type_id": "builtin.oscillator", "start_sample": 0,
+                  "duration_samples": 48_000,
+                  "notes": [{"start_frame": 0, "duration_frames": 48_000,
+                             "pitch_hz": 220.0, "velocity": 0.5}]}),
+    );
+    invoke(
+        json!({"protocol_version": 1, "operation": "set_loop_region", "path": path,
+                  "start_frame": 6_000, "end_frame": 30_000}),
+    );
+
+    let output = directory.path().join("loop-only.wav");
+    let (code, exported) = invoke(json!({"protocol_version": 1, "operation": "export_wav",
+                                         "path": path, "output": output,
+                                         "encoding": "pcm16", "use_loop_region": true}));
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(exported["result"]["frame_count"], 24_000);
+    assert_eq!(
+        jutsu_audio_engine::read_loop_points(&output),
+        Some((0, 24_000))
+    );
+}
+
+/// A repeated one-shot that is the same sound every time is the oldest tell in
+/// game audio. A variation set is several seeds of one recipe, placed in turn,
+/// and it has to stay as reproducible as a single generated sound is.
+#[test]
+fn a_variation_set_cycles_its_versions_and_repeats_exactly() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("variations.jutsu-audio.json");
+    let (_, created) = invoke(json!({"protocol_version": 1, "operation": "create_project",
+                                     "path": path, "name": "Variations"}));
+
+    let request = json!({"protocol_version": 1, "operation": "run_generator_variations",
+                         "path": path,
+                         "track_id": created["result"]["track_id"],
+                         "layer_id": created["result"]["layer_id"],
+                         "type_id": "sfx.impact", "seed": 4_000, "frame_count": 12_000,
+                         "variations": 3,
+                         "placements": [0, 24_000, 48_000, 72_000, 96_000]});
+    let (code, ran) = invoke(request.clone());
+    assert_eq!(code, 0, "{ran}");
+
+    let assets = ran["result"]["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 3, "three seeds, three assets");
+    let clips = ran["result"]["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 5);
+    // Five placements over three versions: the fourth is the first again.
+    assert_eq!(clips[0]["asset_id"], clips[3]["asset_id"]);
+    assert_eq!(clips[1]["asset_id"], clips[4]["asset_id"]);
+    assert_ne!(clips[0]["asset_id"], clips[1]["asset_id"]);
+
+    // The set is derived from the seed, so the same request names the same
+    // assets — running it again adds clips, never a second set of sounds.
+    let second = directory.path().join("again.jutsu-audio.json");
+    invoke(json!({"protocol_version": 1, "operation": "create_project",
+                  "path": second, "name": "Variations"}));
+    let (_, inspected) = invoke(
+        json!({"protocol_version": 1, "operation": "inspect_project",
+                                       "path": second}),
+    );
+    let mut repeat = request;
+    repeat["path"] = json!(second);
+    repeat["track_id"] = inspected["result"]["project"]["tracks"][0]["id"].clone();
+    repeat["layer_id"] = inspected["result"]["project"]["tracks"][0]["layers"][0]["id"].clone();
+    let (_, again) = invoke(repeat);
+    assert_eq!(again["result"]["assets"], ran["result"]["assets"]);
+
+    // And each variation really is a different sound, not the same one three
+    // times: the exported render of one is not the render of another.
+    let (_, exported) = invoke(json!({"protocol_version": 1, "operation": "export_wav",
+                                      "path": path,
+                                      "output": directory.path().join("set.wav"),
+                                      "encoding": "float32"}));
+    assert_eq!(exported["ok"], true, "{exported}");
+    let samples: Vec<f32> = hound::WavReader::open(directory.path().join("set.wav"))
+        .unwrap()
+        .into_samples::<f32>()
+        .map(Result::unwrap)
+        .collect();
+    let first_hit = &samples[0..2_000];
+    let second_hit = &samples[24_000 * 2..24_000 * 2 + 2_000];
+    assert_ne!(
+        first_hit, second_hit,
+        "two variations rendered the same audio"
+    );
+}

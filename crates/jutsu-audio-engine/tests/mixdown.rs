@@ -56,6 +56,7 @@ impl Builder {
             id: TrackId::new(),
             name: format!("Track {}", self.project.tracks.len() + 1),
             output_bus_id: self.bus_id,
+            sends: Vec::new(),
             parameters: BTreeMap::new(),
             layers: vec![Layer {
                 id: LayerId::new(),
@@ -132,6 +133,7 @@ fn track_with(bus_id: &BusId, clip: Clip) -> Track {
         id: TrackId::new(),
         name: "Track".into(),
         output_bus_id: *bus_id,
+        sends: Vec::new(),
         parameters: BTreeMap::new(),
         layers: vec![Layer {
             id: LayerId::new(),

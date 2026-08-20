@@ -103,6 +103,13 @@ enum Request {
         path: PathBuf,
         name: String,
     },
+    /// Removes a track and everything on it. The engine has had this since
+    /// the first command batch; the machine surface had not.
+    RemoveTrack {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+    },
     AddLayer {
         protocol_version: u32,
         path: PathBuf,
@@ -471,6 +478,57 @@ enum Request {
         type_id: String,
         #[serde(default)]
         parameters: BTreeMap<String, ParameterValue>,
+        /// The track this insert listens to rather than its own input.
+        #[serde(default)]
+        sidechain: Option<TrackId>,
+    },
+    /// Runs one recipe as several variations and places them in turn.
+    ///
+    /// A repeated sound that is the same sound every time is the oldest tell in
+    /// game audio. Each variation is the same generator at a different seed, so
+    /// the set is as reproducible as a single one is.
+    RunGeneratorVariations {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        layer_id: LayerId,
+        type_id: String,
+        /// The seed the set is derived from. Variation *n* uses `seed + n`, so
+        /// the same request always builds the same set.
+        seed: u64,
+        frame_count: u64,
+        #[serde(default)]
+        parameters: BTreeMap<String, ParameterValue>,
+        /// How many different versions to make.
+        variations: u32,
+        /// Where to place them, in project frames. The set cycles: the fifth
+        /// placement of a set of three plays the second variation again.
+        placements: Vec<u64>,
+    },
+    /// Writes one WAV per track into a directory, from the same render the
+    /// master comes out of.
+    ExportStems {
+        protocol_version: u32,
+        path: PathBuf,
+        /// Where the files go. Created if it is not there.
+        directory: PathBuf,
+        encoding: CliExportEncoding,
+    },
+    /// Replaces a track's sends. An empty list removes them all.
+    SetTrackSends {
+        protocol_version: u32,
+        path: PathBuf,
+        track_id: TrackId,
+        #[serde(default)]
+        sends: Vec<CliSend>,
+    },
+    /// Points an existing insert at a key track, or takes the key away.
+    SetEffectSidechain {
+        protocol_version: u32,
+        path: PathBuf,
+        effect_id: EffectId,
+        #[serde(default)]
+        track_id: Option<TrackId>,
     },
     RemoveEffect {
         protocol_version: u32,
@@ -563,6 +621,27 @@ impl From<CliEffectTarget> for EffectTarget {
         match target {
             CliEffectTarget::Track { track_id } => Self::Track { track_id },
             CliEffectTarget::Bus { bus_id } => Self::Bus { bus_id },
+        }
+    }
+}
+
+/// One send as a caller writes it: where it goes, how loud, and whether it is
+/// taken before the fader.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CliSend {
+    pub bus_id: jutsu_audio_model::BusId,
+    #[serde(default)]
+    pub gain_db: f64,
+    #[serde(default)]
+    pub pre_fader: bool,
+}
+
+impl From<CliSend> for jutsu_audio_model::SendRoute {
+    fn from(send: CliSend) -> Self {
+        Self {
+            bus_id: send.bus_id,
+            gain_db: send.gain_db,
+            pre_fader: send.pre_fader,
         }
     }
 }
@@ -812,6 +891,9 @@ impl Request {
             | Self::AddTrack {
                 protocol_version, ..
             }
+            | Self::RemoveTrack {
+                protocol_version, ..
+            }
             | Self::AddLayer {
                 protocol_version, ..
             }
@@ -891,6 +973,18 @@ impl Request {
                 protocol_version, ..
             }
             | Self::AddEffect {
+                protocol_version, ..
+            }
+            | Self::SetEffectSidechain {
+                protocol_version, ..
+            }
+            | Self::SetTrackSends {
+                protocol_version, ..
+            }
+            | Self::ExportStems {
+                protocol_version, ..
+            }
+            | Self::RunGeneratorVariations {
                 protocol_version, ..
             }
             | Self::RemoveEffect {
@@ -1017,6 +1111,90 @@ pub fn execute_json(input: &str) -> (i32, Value) {
 }
 
 #[must_use]
+/// A decibel figure as JSON. Silence measures negative infinity, which JSON
+/// cannot carry, so it becomes `null` — the same "there is no number here" the
+/// loudness field uses.
+fn finite(value: f64) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+/// Checks that an insert really has the parameter a lane wants to write, and
+/// that the extension it names is one this build has.
+///
+/// Reads the project rather than the session: a lane is added against what is
+/// stored, and an insert that only exists in an editor's unsaved state is not
+/// something to automate against yet.
+fn validate_effect_parameter(
+    path: &std::path::Path,
+    effect_id: EffectId,
+    parameter: &str,
+) -> Result<(), crate::cli_session::CliFailure> {
+    let project = ProjectStore::open(path).map_err(project_error)?.project;
+    let insert = project
+        .tracks
+        .iter()
+        .flat_map(|track| &track.effects)
+        .chain(project.buses.iter().flat_map(|bus| &bus.effects))
+        .find(|insert| insert.id == effect_id)
+        .ok_or((
+            4,
+            "command_failed",
+            format!("effect {effect_id} does not exist"),
+        ))?;
+
+    let type_id = ExtensionTypeId::new(insert.type_id.clone()).map_err(|error| {
+        (
+            6,
+            "unknown_extension",
+            format!(
+                "effect '{}' is not a valid extension ID: {}",
+                insert.type_id, error.message
+            ),
+        )
+    })?;
+    let descriptor = crate::extensions::registries()
+        .effect_descriptor(&type_id)
+        .ok_or((
+            6,
+            "unknown_extension",
+            format!(
+                "effect '{}' is not registered in this build",
+                insert.type_id
+            ),
+        ))?;
+
+    let known = descriptor
+        .parameters
+        .iter()
+        .find(|declared| declared.id == parameter);
+    match known {
+        Some(declared) if declared.automatable => Ok(()),
+        Some(_) => Err((
+            6,
+            "invalid_parameter",
+            format!("'{parameter}' on '{}' is not automatable", insert.type_id),
+        )),
+        None => Err((
+            6,
+            "unknown_parameter",
+            format!(
+                "'{parameter}' is not a parameter of '{}'; it has {}",
+                insert.type_id,
+                descriptor
+                    .parameters
+                    .iter()
+                    .map(|declared| declared.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
 pub fn error_response(code: &str, message: impl Into<String>) -> Value {
     json!({"ok": false, "protocol_version": CLI_PROTOCOL_VERSION, "error": {"code": code, "message": message.into()}})
 }
@@ -1167,12 +1345,55 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 encoding,
             )
             .map_err(|error| (3, "export_failed", error.message))?;
+
+            // A loop the project knows about is written into the file, so it
+            // still exists once the file has left the editor. When the export
+            // *is* the loop, the whole file is the loop.
+            let written_loop = if use_loop_region {
+                Some((0, report.frame_count))
+            } else {
+                project
+                    .loop_region
+                    .filter(jutsu_audio_model::LoopRegion::is_active)
+                    .filter(|region| {
+                        region.start_frame >= start_frame
+                            && region.end_frame <= start_frame + report.frame_count
+                    })
+                    .map(|region| {
+                        (
+                            region.start_frame - start_frame,
+                            region.end_frame - start_frame,
+                        )
+                    })
+            };
+            if let Some((loop_start, loop_end)) = written_loop {
+                jutsu_audio_engine::write_loop_points(
+                    &output,
+                    report.sample_rate,
+                    loop_start,
+                    loop_end,
+                )
+                .map_err(|error| (3, "export_failed", error.message))?;
+            }
+
             Ok(json!({
                 "type": "wav_exported",
+                "loop_points": written_loop.map(|(start, end)| json!({
+                    "start_frame": start, "end_frame": end
+                })),
                 "output": output,
                 "sample_rate": report.sample_rate,
                 "channel_count": report.channel_count,
                 "frame_count": report.frame_count,
+                // What was written, measured: a delivery target is a number,
+                // and without these a caller has to open the file elsewhere to
+                // find out whether it hit one. `integrated_lufs` is null for
+                // silence, which has no loudness rather than a very small one.
+                "loudness": {
+                    "integrated_lufs": report.loudness.integrated_lufs,
+                    "sample_peak_dbfs": finite(report.loudness.sample_peak_dbfs),
+                    "true_peak_dbfs": finite(report.loudness.true_peak_dbfs),
+                },
                 "diagnostics": diagnostics
                     .iter()
                     .map(|diagnostic| json!({
@@ -1198,6 +1419,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             let track = Track {
                 id: TrackId::new(),
                 name,
+                sends: Vec::new(),
                 // Read from the file rather than the session: the master bus is
                 // fixed when a project is created and no command moves it.
                 output_bus_id: ProjectStore::open(&path)
@@ -1217,6 +1439,13 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             let applied = cli_session::apply(&path, vec![ProjectCommand::AddTrack { track }])?;
             Ok(
                 json!({"type": "track_added", "track_id": track_id, "layer_id": layer_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::RemoveTrack { path, track_id, .. } => {
+            let applied =
+                cli_session::apply(&path, vec![ProjectCommand::RemoveTrack { track_id }])?;
+            Ok(
+                json!({"type": "track_removed", "track_id": track_id, "revision": applied.revision, "delivery": applied.delivery}),
             )
         }
         Request::AddLayer {
@@ -1754,11 +1983,198 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             })?;
             Ok(json!({"type": "effect_described", "effect": described}))
         }
+        Request::RunGeneratorVariations {
+            path,
+            track_id,
+            layer_id,
+            type_id,
+            seed,
+            frame_count,
+            parameters,
+            variations,
+            placements,
+            ..
+        } => {
+            if variations == 0 {
+                return Err((
+                    2,
+                    "invalid_request",
+                    "a variation set needs at least one variation".to_owned(),
+                ));
+            }
+
+            // Every variation is validated before any of it is applied: a set
+            // that is half legal is not a set.
+            let mut recipes = Vec::new();
+            for index in 0..u64::from(variations) {
+                let recipe = cli_generator::recipe(
+                    type_id.clone(),
+                    1,
+                    seed.wrapping_add(index),
+                    frame_count,
+                    parameters.clone(),
+                );
+                cli_generator::validate(crate::extensions::registries(), &recipe)?;
+                recipes.push(recipe);
+            }
+
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let mut commands = Vec::new();
+            let mut assets = Vec::new();
+            for recipe in &recipes {
+                let (asset_id, _) = cli_generator::identity(recipe, RegenerateMode::Replace, 0);
+                assets.push(asset_id);
+                if project.assets.iter().any(|asset| asset.id == asset_id) {
+                    continue;
+                }
+                commands.push(ProjectCommand::AddAsset {
+                    asset: jutsu_audio_model::Asset {
+                        id: asset_id,
+                        name: recipe.generator_type.clone(),
+                        source: recipe.asset_source(),
+                    },
+                });
+            }
+
+            let mut placed = Vec::new();
+            for (index, start_sample) in placements.iter().enumerate() {
+                let asset_id = assets[index % assets.len()];
+                let clip = Clip {
+                    id: ClipId::new(),
+                    asset_id,
+                    start_sample: *start_sample,
+                    source_start_sample: 0,
+                    duration_samples: frame_count,
+                    parameters: BTreeMap::new(),
+                    notes: Vec::new(),
+                    pattern_id: None,
+                };
+                placed.push(json!({
+                    "clip_id": clip.id,
+                    "asset_id": asset_id,
+                    "start_sample": start_sample,
+                }));
+                commands.push(ProjectCommand::AddClip {
+                    track_id,
+                    layer_id,
+                    clip,
+                });
+            }
+
+            let applied = cli_session::apply(&path, commands)?;
+            Ok(json!({
+                "type": "generator_variations_run",
+                "assets": assets,
+                "clips": placed,
+                "revision": applied.revision,
+                "delivery": applied.delivery,
+            }))
+        }
+        Request::ExportStems {
+            path,
+            directory,
+            encoding,
+            ..
+        } => {
+            let project = ProjectStore::open(&path).map_err(project_error)?.project;
+            let (stems, sample_rate, diagnostics) = build_stems(&project, &path)?;
+            let encoding = match encoding {
+                CliExportEncoding::Pcm16 => ExportEncoding::Pcm16,
+                CliExportEncoding::Float32 => ExportEncoding::Float32,
+            };
+
+            let mut written = Vec::new();
+            for (index, stem) in stems.into_iter().enumerate() {
+                // Numbered and slugged: two tracks may share a name, and a
+                // stem set that silently loses one is worse than an ugly file
+                // name.
+                let file = directory.join(format!("{:02}-{}.wav", index + 1, slug(&stem.name)));
+                let snapshot = PlaybackSnapshot::new(
+                    sample_rate,
+                    MIX_CHANNELS,
+                    std::sync::Arc::from(stem.samples),
+                )
+                .map_err(|error| (3, "export_failed", error.message))?;
+                let frames = snapshot.samples().len() / usize::from(MIX_CHANNELS.max(1));
+                let report = OfflineExporter::export_wav(
+                    std::sync::Arc::new(snapshot),
+                    &file,
+                    ExportRange {
+                        start_frame: 0,
+                        frame_count: frames as u64,
+                    },
+                    encoding,
+                )
+                .map_err(|error| (3, "export_failed", error.message))?;
+                written.push(json!({
+                    "track_id": stem.track_id,
+                    "name": stem.name,
+                    "output": file,
+                    "frame_count": report.frame_count,
+                    "loudness": {
+                        "integrated_lufs": report.loudness.integrated_lufs,
+                        "sample_peak_dbfs": finite(report.loudness.sample_peak_dbfs),
+                        "true_peak_dbfs": finite(report.loudness.true_peak_dbfs),
+                    },
+                }));
+            }
+
+            Ok(json!({
+                "type": "stems_exported",
+                "directory": directory,
+                "sample_rate": sample_rate,
+                "channel_count": MIX_CHANNELS,
+                "stems": written,
+                "diagnostics": diagnostics
+                    .iter()
+                    .map(|diagnostic| json!({
+                        "code": format!("{:?}", diagnostic.code).to_lowercase(),
+                        "entity_id": diagnostic.entity_id,
+                        "message": diagnostic.message,
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Request::SetTrackSends {
+            path,
+            track_id,
+            sends,
+            ..
+        } => {
+            let sends: Vec<jutsu_audio_model::SendRoute> =
+                sends.into_iter().map(Into::into).collect();
+            let count = sends.len();
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetTrackSends { track_id, sends }],
+            )?;
+            Ok(
+                json!({"type": "track_sends_set", "track_id": track_id, "send_count": count, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
+        Request::SetEffectSidechain {
+            path,
+            effect_id,
+            track_id,
+            ..
+        } => {
+            let applied = cli_session::apply(
+                &path,
+                vec![ProjectCommand::SetEffectSidechain {
+                    effect_id,
+                    track_id,
+                }],
+            )?;
+            Ok(
+                json!({"type": "effect_sidechain_set", "effect_id": effect_id, "track_id": track_id, "revision": applied.revision, "delivery": applied.delivery}),
+            )
+        }
         Request::AddEffect {
             path,
             target,
             type_id,
             parameters,
+            sidechain,
             ..
         } => {
             let state_version =
@@ -1770,6 +2186,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 parameters,
                 enabled: true,
                 wet: 1.0,
+                sidechain,
             };
             let effect_id = effect.id;
             let applied = cli_session::apply(
@@ -1881,7 +2298,17 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             // Only the name is checked here: a lane's values are bounded by the
             // same descriptor when they are rendered, and a caller drawing a
             // curve should not be stopped mid-draw by one out-of-range point.
-            cli_mixer::validate_strip(&parameter, &ParameterValue::Float(0.0))?;
+            //
+            // Which descriptor depends on what is being written to. A strip has
+            // gain and pan; an insert has whatever its extension declares, and
+            // checking an effect lane against the strip list is how a filter
+            // sweep gets refused for not being a fader.
+            match target {
+                jutsu_audio_model::AutomationTarget::Effect { effect_id } => {
+                    validate_effect_parameter(&path, effect_id, &parameter)?;
+                }
+                _ => cli_mixer::validate_strip(&parameter, &ParameterValue::Float(0.0))?,
+            }
             let mut lane = jutsu_audio_model::AutomationLane {
                 id: AutomationId::new(),
                 target,
@@ -2448,34 +2875,7 @@ fn build_master_snapshot(
     project: &Project,
     project_path: &Path,
 ) -> Result<MasterMix, (i32, &'static str, String)> {
-    let project_directory = project_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut decoded: HashMap<AssetId, SourceAudio> = HashMap::new();
-    for asset in &project.assets {
-        let path = match &asset.source {
-            AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
-            // Rendered rather than read: a generator runs, a synth is played,
-            // and a sampler plays the project's other assets.
-            AudioAssetSource::Generated { .. }
-            | AudioAssetSource::Synth { .. }
-            | AudioAssetSource::Sampler { .. } => continue,
-        };
-        let Ok((metadata, samples)) =
-            AssetManager::decode_wav_samples(project_directory.join(path))
-        else {
-            // Left out of the map: a clip that needs it fails the mix with a
-            // structured error naming the clip, which is more use than naming
-            // the file here.
-            continue;
-        };
-        decoded.insert(
-            asset.id,
-            SourceAudio {
-                sample_rate: metadata.sample_rate,
-                channels: metadata.channels,
-                samples: samples.into(),
-            },
-        );
-    }
+    let decoded = decode_assets(project, project_path);
 
     let sample_rate = project
         .assets
@@ -2503,6 +2903,97 @@ fn build_master_snapshot(
             .map_err(|error| (3, "export_failed", error.message))?,
     };
     Ok((std::sync::Arc::new(snapshot), mixed.diagnostics))
+}
+
+/// Every asset that is a file on disk, decoded once.
+///
+/// An asset that will not decode is left out rather than reported here: a clip
+/// that needs it fails the mix with an error naming the clip, which is more use
+/// to a caller than the name of a file it did not ask about. Generated, synth
+/// and sampler assets are not files — the mix renders those.
+fn decode_assets(project: &Project, project_path: &Path) -> HashMap<AssetId, SourceAudio> {
+    let project_directory = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut decoded: HashMap<AssetId, SourceAudio> = HashMap::new();
+    for asset in &project.assets {
+        let path = match &asset.source {
+            AudioAssetSource::ManagedFile { path, .. } | AudioAssetSource::File { path } => path,
+            AudioAssetSource::Generated { .. }
+            | AudioAssetSource::Synth { .. }
+            | AudioAssetSource::Sampler { .. } => continue,
+        };
+        let Ok((metadata, samples)) =
+            AssetManager::decode_wav_samples(project_directory.join(path))
+        else {
+            continue;
+        };
+        decoded.insert(
+            asset.id,
+            SourceAudio {
+                sample_rate: metadata.sample_rate,
+                channels: metadata.channels,
+                samples: samples.into(),
+            },
+        );
+    }
+    decoded
+}
+
+/// Renders the project once and keeps every track's own buffer.
+///
+/// The same decode-and-mix path `build_master_snapshot` uses, asking the mix to
+/// hold on to the stems rather than only the sum — one render, so a stem and
+/// the master can never disagree about what was played.
+type BuiltStems = (
+    Vec<jutsu_audio_engine::mixdown::Stem>,
+    u32,
+    Vec<jutsu_audio_engine::effects::MixDiagnostic>,
+);
+
+fn build_stems(
+    project: &Project,
+    project_path: &Path,
+) -> Result<BuiltStems, (i32, &'static str, String)> {
+    let decoded = decode_assets(project, project_path);
+    let sample_rate = project
+        .assets
+        .iter()
+        .find_map(|asset| decoded.get(&asset.id))
+        .map_or(48_000, |source| source.sample_rate);
+
+    let mixed = jutsu_audio_engine::mixdown::mix_project_stems(
+        project,
+        sample_rate,
+        crate::extensions::registries(),
+        |asset_id| {
+            decoded
+                .get(&asset_id)
+                .cloned()
+                .ok_or_else(|| format!("asset {asset_id} has no readable WAV source"))
+        },
+    )
+    .map_err(|error| (3, "export_failed", error.message))?;
+
+    Ok((mixed.stems, sample_rate, mixed.diagnostics))
+}
+
+/// A file name from a track name: lowercase, hyphenated, nothing a filesystem
+/// argues with. An empty result becomes `track`, because a file called `.wav`
+/// is not a file anyone can find.
+fn slug(name: &str) -> String {
+    let mut slug = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_owned();
+    if trimmed.is_empty() {
+        "track".to_owned()
+    } else {
+        trimmed
+    }
 }
 
 fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static str, String) {

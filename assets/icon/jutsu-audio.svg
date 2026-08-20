@@ -1,0 +1,25 @@
+<!--
+  The application icon: three level bars in the one saturated colour the
+  interface uses (SIGNAL, src/theme.rs), on the console's own dark surface.
+  Three bars rather than a waveform because 16px is the size that decides an
+  icon, and a waveform turns to mush there.
+
+  Regenerate the .ico after editing this file:
+
+      magick -background none assets/icon/jutsu-audio.svg -define icon:auto-resize=256,128,64,48,32,24,16 assets/icon/jutsu-audio.ico
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#242935"/>
+      <stop offset="1" stop-color="#101216"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="url(#surface)"/>
+  <rect x="0.5" y="0.5" width="255" height="255" rx="55.5" ry="55.5" fill="none" stroke="#39404e" stroke-width="3"/>
+  <g fill="#f0a531">
+    <rect x="48" y="84" width="40" height="88" rx="20" ry="20"/>
+    <rect x="108" y="44" width="40" height="168" rx="20" ry="20"/>
+    <rect x="168" y="68" width="40" height="120" rx="20" ry="20"/>
+  </g>
+</svg>

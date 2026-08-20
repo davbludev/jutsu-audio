@@ -49,6 +49,10 @@ pub const OPERATIONS: &[(&str, &str)] = &[
     ("add_clip", "Places an asset on a track's layer."),
     ("update_clip", "Retimes, trims or re-gains a clip."),
     ("delete_clip", "Removes a clip, optionally closing the gap."),
+    (
+        "export_stems",
+        "Writes one WAV per track from a single render.",
+    ),
     ("export_wav", "Renders the master mix to a WAV file."),
     (
         "transport_request",
@@ -59,6 +63,7 @@ pub const OPERATIONS: &[(&str, &str)] = &[
         "Whether an editor holds this project, and at what revision.",
     ),
     ("add_track", "Adds a track routed to a bus."),
+    ("remove_track", "Removes a track, its layers and its clips."),
     ("add_layer", "Adds a lane to a track."),
     ("set_track_mute", "Mutes or unmutes a track."),
     ("set_track_solo", "Solos or unsolos a track."),
@@ -105,6 +110,10 @@ pub const OPERATIONS: &[(&str, &str)] = &[
     (
         "preview_generator",
         "Renders a generator without touching the project.",
+    ),
+    (
+        "run_generator_variations",
+        "Runs one recipe as several variations and places them in turn.",
     ),
     (
         "run_generator",
@@ -171,6 +180,14 @@ pub const OPERATIONS: &[(&str, &str)] = &[
         "One effect's parameters, ranges and defaults.",
     ),
     ("add_effect", "Inserts an effect on a track or bus."),
+    (
+        "set_track_sends",
+        "Replaces a track's parallel sends to buses.",
+    ),
+    (
+        "set_effect_sidechain",
+        "Points an insert at a key track, or removes the key.",
+    ),
     ("remove_effect", "Removes an effect insert."),
     ("move_effect", "Reorders an effect within its chain."),
     ("set_effect_enabled", "Bypasses or re-enables an effect."),

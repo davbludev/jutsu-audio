@@ -37,11 +37,35 @@ it has moved.
 - `examples/pocket-extensions` — the third-party extension example, a workspace member outside
   `crates/`. Depends only on the published extension surface; its tests are the conformance run
   a pack author writes. Rules: `docs/extension-sdk.md`.
+- `crates/jutsu-audio-extensions/src/subtractive.rs` — `builtin.subtractive`: ADSR, a
+  topology-preserving state-variable filter with its own envelope, unison, and PolyBLEP-limited
+  oscillators. The instrument; `builtin.oscillator` stays naive on purpose.
+- `crates/jutsu-audio-extensions/src/effects/` — one file per effect. `eq`, `saturation`,
+  `modulation` (chorus) and `limiter` joined the original four. `Effect::set_parameter`,
+  `set_channel` and `process_with_key` are the hooks that make a parameter movable, a channel
+  distinguishable and a sidechain possible; all three default to doing nothing.
+- `crates/jutsu-audio-engine/src/effects.rs` — `apply_chain` walks the buffer in 1024-frame
+  blocks, setting automated parameters and `tempo_bpm` before each. `ChainContext` carries the
+  lanes, the tempo and the rendered key tracks.
+- `crates/jutsu-audio-extensions/src/effects/convolution.rs` — partitioned FFT convolution.
+  `IMPULSE_PARAMETER` is the text parameter naming the asset; the mix loads it and calls
+  `Effect::set_impulse`, because extensions never read files.
+- `crates/jutsu-audio-engine/src/loudness.rs` — BS.1770 integrated LUFS and true peak. Used by
+  `OfflineExporter::export_wav`, reported by the CLI's `export_wav`.
 - `crates/jutsu-audio-extensions::conformance` — the checks any extension runs, built-ins
   included (`crates/jutsu-audio-extensions/tests/conformance.rs`).
 - `xtask/src/package.rs` + `smoke.rs` — `cargo package-release` builds a release directory
   (binaries, docs, generated INSTALL/notices/SHA256SUMS); `cargo smoke <dir>` runs the packaged
   binaries like a user would. Process and platform list: `docs/release.md`.
+- `assets/icon/` — the application mark. `jutsu-audio.svg` is the source, with the small-size
+  variant beside it and the regeneration command in its comment; `jutsu-audio.ico` is compiled
+  into the executable by `build.rs` through `jutsu-audio.rc`, and `jutsu-audio-256.png` is what
+  `main::window_icon` hands eframe, because winit leaves the window class icon empty. Shape
+  checked by `tests/icon.rs`.
+- `installer/install.ps1` — the Windows installer, shipped by being listed in `package.rs::plan`
+  as an ordinary copied document, not generated. Per-user throughout: `%LOCALAPPDATA%`, the
+  user's own PATH (never `setx`, never the machine environment) and the per-user Start Menu.
+  `-Uninstall` reverses all three. Guarded by `xtask/tests/release_package.rs`.
 - `src/ui_harness.rs` — test-only headless egui harness: runs panels, injects keys and clicks,
   and reads back laid-out text. `Frame::position_of` is how a test clicks a control by its label.
 - `src/contrast.rs` — WCAG ratio maths plus the table of foreground/background pairs the theme
@@ -60,6 +84,10 @@ it has moved.
 - `src/cli.rs` + `src/bin/jutsu-audio-cli.rs` — the machine surface. Reached through
   `src/lib.rs`, which exists only to expose `cli` to the binary and to `tests/cli_protocol.rs`.
   Request variants are tagged with `"operation"`, not `"type"`.
+- `src/mcp.rs` — `jutsu-audio-cli --mcp`: MCP over stdin/stdout, newline-delimited JSON-RPC.
+  Adds no operations — `handle_line` dispatches and every tool call lands in
+  `cli::execute_json`. Two tools only, because `describe_protocol` is the discovery surface.
+  Driven end to end by `tests/mcp_protocol.rs`.
 - `src/cli_session.rs` — the only place that decides between editing through a live editor and
   editing the file under the write lock. Every mutating CLI operation goes through
   `cli_session::apply`; the `delivery` field in the response says which route it took.

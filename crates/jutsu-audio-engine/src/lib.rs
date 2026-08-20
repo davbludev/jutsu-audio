@@ -8,6 +8,7 @@ use jutsu_audio_extensions::ExtensionTypeId;
 use jutsu_audio_model::{AssetId, BusId, ClipId, LoopRegion, ParameterValue, ProjectId};
 
 pub mod effects;
+pub mod loudness;
 pub mod mixdown;
 pub mod sampler;
 
@@ -604,11 +605,17 @@ impl ExportRange {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// No `Eq`: loudness is measured in floats, and two renders being equal is a
+// question about their samples rather than about their reports.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportReport {
     pub sample_rate: u32,
     pub channel_count: u16,
     pub frame_count: u64,
+    /// What the file measures, rather than what it contains. A delivery target
+    /// is stated in these numbers, so the exporter answers in them rather than
+    /// leaving the question to whatever opens the file next.
+    pub loudness: crate::loudness::Loudness,
 }
 
 #[derive(Debug)]
@@ -678,8 +685,108 @@ impl OfflineExporter {
             sample_rate: snapshot.sample_rate,
             channel_count: snapshot.channel_count,
             frame_count: (end - start) as u64,
+            // Measured on what was written, not on the whole snapshot: an
+            // exported loop is a different piece of audio from the timeline it
+            // came out of.
+            loudness: crate::loudness::measure(
+                samples,
+                snapshot.channel_count,
+                snapshot.sample_rate,
+            ),
         })
     }
+}
+
+/// Writes a `smpl` chunk onto a finished WAV, marking the loop it holds.
+///
+/// The project knows where its loop is; the file it exports does not, and the
+/// game engine or sampler that opens it next has no way to be told. `smpl` is
+/// the chunk every one of them reads, and appending it is legal RIFF: chunks a
+/// reader does not recognise are skipped, so a file with one still opens
+/// anywhere a file without one does.
+///
+/// # Errors
+///
+/// Fails if the file cannot be read back or rewritten, or if the loop is empty.
+pub fn write_loop_points(
+    path: impl AsRef<std::path::Path>,
+    sample_rate: u32,
+    start_frame: u64,
+    end_frame: u64,
+) -> Result<(), ExportError> {
+    let path = path.as_ref();
+    let mut file = std::fs::read(path).map_err(|error| ExportError {
+        message: format!("failed to read the export back: {error}"),
+    })?;
+    if file.len() < 12 || &file[0..4] != b"RIFF" {
+        return Err(ExportError {
+            message: "the export is not a RIFF file".to_owned(),
+        });
+    }
+    // A loop of zero length is not a loop, and an end before its start is a
+    // caller mistake worth naming rather than writing into the file.
+    if end_frame <= start_frame {
+        return Err(ExportError {
+            message: format!("loop end {end_frame} is not after loop start {start_frame}"),
+        });
+    }
+
+    let mut chunk = Vec::with_capacity(68);
+    chunk.extend_from_slice(b"smpl");
+    chunk.extend_from_slice(&60_u32.to_le_bytes());
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // manufacturer
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // product
+    // The period of one frame in nanoseconds, which is how `smpl` states rate.
+    let period = 1_000_000_000_u64 / u64::from(sample_rate.max(1));
+    chunk.extend_from_slice(&(period as u32).to_le_bytes());
+    chunk.extend_from_slice(&60_u32.to_le_bytes()); // unity note: middle C
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // pitch fraction
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // SMPTE format
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // SMPTE offset
+    chunk.extend_from_slice(&1_u32.to_le_bytes()); // one loop
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // no sampler-specific data
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // loop identifier
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // forward loop
+    chunk.extend_from_slice(&(start_frame as u32).to_le_bytes());
+    // `end` names the last frame inside the loop, not the one after it.
+    chunk.extend_from_slice(&((end_frame - 1) as u32).to_le_bytes());
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // fraction
+    chunk.extend_from_slice(&0_u32.to_le_bytes()); // play count: forever
+
+    file.extend_from_slice(&chunk);
+    let riff_size = (file.len() - 8) as u32;
+    file[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    std::fs::write(path, file).map_err(|error| ExportError {
+        message: format!("failed to write the loop points: {error}"),
+    })
+}
+
+/// Reads a `smpl` loop back out of a WAV, if it has one.
+///
+/// Here so that "the loop survives export" is a test rather than a promise, and
+/// so a caller can ask what a file already says.
+#[must_use]
+pub fn read_loop_points(path: impl AsRef<std::path::Path>) -> Option<(u64, u64)> {
+    let file = std::fs::read(path).ok()?;
+    let mut cursor = 12;
+    while cursor + 8 <= file.len() {
+        let id = &file[cursor..cursor + 4];
+        let size = u32::from_le_bytes(file[cursor + 4..cursor + 8].try_into().ok()?) as usize;
+        let body = cursor + 8;
+        if id == b"smpl" && size >= 60 && body + size <= file.len() {
+            let loops = u32::from_le_bytes(file[body + 28..body + 32].try_into().ok()?);
+            if loops == 0 {
+                return None;
+            }
+            let start = u32::from_le_bytes(file[body + 44..body + 48].try_into().ok()?);
+            let end = u32::from_le_bytes(file[body + 48..body + 52].try_into().ok()?);
+            return Some((u64::from(start), u64::from(end) + 1));
+        }
+        // Chunks are padded to an even length; the padding byte is not counted
+        // in the size, and a reader that forgets it walks off the rails.
+        cursor = body + size + (size % 2);
+    }
+    None
 }
 
 impl SystemAudioOutput {

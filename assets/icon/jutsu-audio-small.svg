@@ -1,0 +1,14 @@
+<!--
+  The same mark for 16, 24 and 32 pixels, where the full icon's outline and
+  gradient cost more legibility than they buy: flat surface, no border, wider
+  gaps between the bars so they stay three bars instead of one block.
+  Regeneration command: see jutsu-audio.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="#1b202a"/>
+  <g fill="#f0a531">
+    <rect x="36" y="80" width="46" height="96" rx="23" ry="23"/>
+    <rect x="105" y="40" width="46" height="176" rx="23" ry="23"/>
+    <rect x="174" y="64" width="46" height="128" rx="23" ry="23"/>
+  </g>
+</svg>

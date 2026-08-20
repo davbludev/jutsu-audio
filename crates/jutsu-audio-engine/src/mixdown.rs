@@ -11,14 +11,14 @@
 use std::sync::Arc;
 
 use jutsu_audio_extensions::{ExtensionRegistries, ExtensionTypeId, NoteEvent};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use jutsu_audio_model::{
     AssetId, AudioAssetSource, AutomationLane, AutomationTarget, BusId, Clip, ParameterValue,
     Project, Track, TrackId,
 };
 
-use crate::effects::{ChainTiming, MixDiagnostic, MixDiagnosticCode, apply_chain};
+use crate::effects::{ChainContext, ChainTiming, MixDiagnostic, MixDiagnosticCode, apply_chain};
 use crate::{PlaybackSnapshot, SnapshotError};
 
 /// Everything mixes to stereo for now; the mixer phase introduces real bus
@@ -107,6 +107,20 @@ pub struct MixOutput {
     /// is compensated here: an offline render lays everything on one timeline,
     /// and a caller aligning against live playback needs the numbers.
     pub timing: ChainTiming,
+    /// One rendered buffer per track, in project order, when stems were asked
+    /// for. Each is that track after its own inserts and its own fader, and
+    /// before any bus touches it — which is what a game engine or another DAW
+    /// expects a stem to be.
+    pub stems: Vec<Stem>,
+}
+
+/// One track, rendered on its own.
+#[derive(Clone, Debug)]
+pub struct Stem {
+    pub track_id: TrackId,
+    pub name: String,
+    /// Interleaved, the same rate and channel count as the master render.
+    pub samples: Vec<f32>,
 }
 
 /// Sums a project into one interleaved stereo snapshot at `sample_rate`.
@@ -130,13 +144,37 @@ pub fn mix_project_metered(
     project: &Project,
     sample_rate: u32,
     extensions: &ExtensionRegistries,
+    load: impl FnMut(AssetId) -> Result<SourceAudio, String>,
+) -> Result<MixOutput, MixError> {
+    mix_inner(project, sample_rate, extensions, load, false)
+}
+
+/// The same mix again, keeping each track's own render.
+///
+/// One pass, not two: a stem has to be the same audio the master was built
+/// from, and rendering twice would be two chances to disagree.
+pub fn mix_project_stems(
+    project: &Project,
+    sample_rate: u32,
+    extensions: &ExtensionRegistries,
+    load: impl FnMut(AssetId) -> Result<SourceAudio, String>,
+) -> Result<MixOutput, MixError> {
+    mix_inner(project, sample_rate, extensions, load, true)
+}
+
+fn mix_inner(
+    project: &Project,
+    sample_rate: u32,
+    extensions: &ExtensionRegistries,
     mut load: impl FnMut(AssetId) -> Result<SourceAudio, String>,
+    collect_stems: bool,
 ) -> Result<MixOutput, MixError> {
     let audible = audible_tracks(project);
     let total_frames = timeline_frames(&audible)?;
     if total_frames == 0 {
         return Ok(MixOutput {
             snapshot: None,
+            stems: Vec::new(),
             meters: Meters::default(),
             diagnostics: Vec::new(),
             timing: ChainTiming::default(),
@@ -153,10 +191,106 @@ pub fn mix_project_metered(
         .map(|bus| (bus.id, vec![0.0_f32; samples]))
         .collect();
     let mut meters = Meters::default();
+    let mut diagnostics = Vec::new();
+    // Everything the chains need to follow the timeline: the lanes that write
+    // to inserts, and the tempo some effects sync to. Collected once — the same
+    // set applies to every strip, and filtering per insert is cheaper than
+    // walking the project again for each.
+    let tempo = project.tempo_map();
+    let effect_lanes: Vec<&jutsu_audio_model::AutomationLane> = project
+        .automation
+        .iter()
+        .filter(|lane| matches!(lane.target, AutomationTarget::Effect { .. }))
+        .collect();
+    // Anything named as a sidechain key is rendered first and kept, so the
+    // strip that ducks under it has something to duck under. Ordinary tracks
+    // are not kept: one buffer at a time is the whole point of the loop below.
+    let keys: BTreeSet<TrackId> = project
+        .tracks
+        .iter()
+        .flat_map(|track| &track.effects)
+        .chain(project.buses.iter().flat_map(|bus| &bus.effects))
+        .filter_map(|insert| insert.sidechain)
+        .collect();
+    let mut key_buffers: BTreeMap<TrackId, Vec<f32>> = BTreeMap::new();
+    for track in audible.iter().filter(|track| keys.contains(&track.id)) {
+        let mut buffer = vec![0.0_f32; samples];
+        for clip in track.layers.iter().flat_map(|layer| &layer.clips) {
+            render_one_clip(
+                &mut buffer,
+                total_frames,
+                project,
+                clip,
+                extensions,
+                sample_rate,
+                &mut load,
+                &mut diagnostics,
+            )?;
+        }
+        // The key is what the track sounds like, fader and all: ducking under
+        // a kick that has been turned down should duck less.
+        apply_strip(
+            &mut buffer,
+            &track.parameters,
+            &lanes_for(project, AutomationTarget::Track { track_id: track.id }),
+        );
+        key_buffers.insert(track.id, buffer);
+    }
+
+    // Impulse responses, loaded once each however many inserts want them, and
+    // folded to mono: a convolver works on one channel at a time.
+    let mut impulses: BTreeMap<AssetId, Vec<f32>> = BTreeMap::new();
+    for insert in project
+        .tracks
+        .iter()
+        .flat_map(|track| &track.effects)
+        .chain(project.buses.iter().flat_map(|bus| &bus.effects))
+    {
+        let Some(jutsu_audio_model::ParameterValue::Text(named)) = insert
+            .parameters
+            .get(jutsu_audio_extensions::effects::convolution::IMPULSE_PARAMETER)
+        else {
+            continue;
+        };
+        let Ok(asset_id) = named.parse::<AssetId>() else {
+            continue;
+        };
+        if impulses.contains_key(&asset_id) {
+            continue;
+        }
+        let Ok(source) = load(asset_id) else {
+            diagnostics.push(MixDiagnostic {
+                code: MixDiagnosticCode::SourceUnreadable,
+                entity_id: insert.id.to_string(),
+                message: format!(
+                    "impulse asset {asset_id} could not be read; the convolver passes its audio through"
+                ),
+            });
+            continue;
+        };
+        let channels = usize::from(source.channels.max(1));
+        let mono: Vec<f32> = source
+            .samples
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect();
+        // Resampling is the effect's business: it knows what rate it is
+        // rendering at, and the impulse carries its own.
+        let _ = source.sample_rate;
+        impulses.insert(asset_id, mono);
+    }
+
+    let chain_context = ChainContext {
+        lanes: &effect_lanes,
+        tempo: &tempo,
+        start_frame: 0,
+        keys: &key_buffers,
+        impulses: &impulses,
+    };
     let mut track_buffer = vec![0.0_f32; samples];
     let mut master = None;
-    let mut diagnostics = Vec::new();
     let mut timing = ChainTiming::default();
+    let mut stems = Vec::new();
 
     for track in &audible {
         track_buffer.fill(0.0);
@@ -179,15 +313,52 @@ pub fn mix_project_metered(
             &track.effects,
             extensions,
             sample_rate,
+            &chain_context,
             &mut diagnostics,
         );
         timing = combine(timing, track_timing);
+
+        // A pre-fader send copies the signal as the effects left it, before the
+        // fader has had a say. Only kept when something asks for one.
+        let pre_fader = track
+            .sends
+            .iter()
+            .any(|send| send.pre_fader)
+            .then(|| track_buffer.clone());
+
         apply_strip(
             &mut track_buffer,
             &track.parameters,
             &lanes_for(project, AutomationTarget::Track { track_id: track.id }),
         );
         meters.tracks.insert(track.id, peak_of(&track_buffer));
+
+        // Sends before the output, though the order does not matter: a send
+        // adds a copy to its destination rather than diverting anything from
+        // here. Every track is summed before any bus folds, so a send can name
+        // any bus without the fold order having to know about it.
+        for send in &track.sends {
+            let source = if send.pre_fader {
+                pre_fader.as_deref().unwrap_or(&track_buffer)
+            } else {
+                &track_buffer
+            };
+            let gain = 10_f32.powf(send.gain_db as f32 / 20.0);
+            if let Some(bus) = bus_buffers.get_mut(&send.bus_id) {
+                for (destination, sample) in bus.iter_mut().zip(source) {
+                    *destination += sample * gain;
+                }
+            }
+        }
+
+        if collect_stems {
+            stems.push(Stem {
+                track_id: track.id,
+                name: track.name.clone(),
+                samples: track_buffer.clone(),
+            });
+        }
+
         if let Some(bus) = bus_buffers.get_mut(&track.output_bus_id) {
             add_into(bus, &track_buffer);
         }
@@ -215,6 +386,7 @@ pub fn mix_project_metered(
                 effects,
                 extensions,
                 sample_rate,
+                &chain_context,
                 &mut diagnostics,
             );
             timing = combine(timing, bus_timing);
@@ -250,6 +422,7 @@ pub fn mix_project_metered(
         // No master bus in the project. Validation will already have said so.
         return Ok(MixOutput {
             snapshot: None,
+            stems,
             meters,
             diagnostics,
             timing,
@@ -259,6 +432,7 @@ pub fn mix_project_metered(
         .map_err(MixError::from)?;
     Ok(MixOutput {
         snapshot: Some(snapshot),
+        stems,
         meters,
         diagnostics,
         timing,

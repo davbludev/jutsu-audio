@@ -90,10 +90,33 @@ covered only through the state they change.
 | Batches are all-or-nothing and refuse to run behind an editor | `a_batch_that_fails_partway_leaves_the_project_exactly_as_it_was`, `a_batch_refuses_to_run_behind_a_live_editor` |
 | A script needs no GUI and no prose | `a_representative_script_works_from_discovery_alone`; `describe_protocol_lists_every_operation_the_build_accepts` |
 
+## Sound design
+
+| What | Evidence |
+| --- | --- |
+| A synth whose tone moves while a note is held: ADSR, resonant filter with its own envelope, unison | `crates/jutsu-audio-extensions/src/subtractive.rs` tests — a held note's high-frequency energy falls by more than a factor of three as the filter closes, and the stack detunes around the played pitch rather than off it |
+| Its oscillators are band-limited | `band_limited` in the same module: polynomial correction on every edge, so a saw is an instrument rather than an aliasing pattern |
+| An effect parameter can be automated | `crates/jutsu-audio-engine/tests/effect_automation.rs` — a cutoff lane opens a filter across a render, an un-automated insert renders from its stored value, and a delay's tail survives the block boundaries the sweep is made of |
+| An insert can listen to another strip | `crates/jutsu-audio-engine/tests/sidechain.rs` — a keyed compressor ducks its tone under each kick, an unkeyed one does not move, and a key that is not there leaves the mix rendering |
+| A delay can be given beats instead of milliseconds | `sync_beats` in `crates/jutsu-audio-extensions/src/effects/delay.rs`, resolved against the tempo the host offers each block |
+| EQ, saturation, chorus and a lookahead limiter | `crates/jutsu-audio-extensions/src/effects/`; every one conformance-checked by `tests/conformance.rs` |
+
+| A track can send a copy of itself somewhere | `crates/jutsu-audio-engine/tests/sends.rs` — a unity send doubles what the master hears without taking anything from the output, a send carries its own level, and pre-fader and post-fader are told apart by turning the fader down |
+| Convolution against a real impulse response | `crates/jutsu-audio-extensions/src/effects/convolution.rs` tests — a one-spike impulse returns the signal unchanged, a spike at frame 400 delays by exactly 400, a decaying impulse leaves a tail, and a missing impulse passes audio through |
+
+**Limits.** Sends come from tracks, not from buses. The convolver truncates an impulse at eight
+seconds, resamples linearly, and leaves the last partial block of a render silent — all three are
+written down in its own module rather than only here. Nothing renders the reverb tail past the
+end of the timeline; `tail_frames` reports how long it would be.
+
 ## Export
 
 | What | Evidence |
 | --- | --- |
+| Loudness is measured, not estimated | `crates/jutsu-audio-engine/src/loudness.rs` — integrated LUFS against the published 1 kHz check (−23 dBFS reads −23 LUFS within 0.1), plus sample and four-times-oversampled true peak |
+| Stems, from the same render as the master | `tests/cli_protocol.rs::stems_are_written_per_track_and_sum_back_to_the_master` — the files add back up to the mix sample for sample |
+| The loop survives the export | `an_exported_wav_carries_the_projects_loop_points`, `exporting_the_loop_region_marks_the_whole_file_as_the_loop` — written as a `smpl` chunk and read back out of the file itself |
+| A repeated one-shot is not the same sound every time | `a_variation_set_cycles_its_versions_and_repeats_exactly` — three seeds, five placements, cycling, and the same request names the same set again |
 | Playback and export produce identical audio | `crates/jutsu-audio-engine/tests/offline_export.rs`, `render_parity.rs` |
 | Block size does not change what is heard | `block_size_does_not_change_what_is_played` |
 | Export covers the timeline and not the tail beyond it | `an_export_covers_the_timeline_and_not_the_tail_beyond_it` |
@@ -119,11 +142,13 @@ failing a build for being busy. There is no automated regression alarm on them.
 | Reproducible package with checksums, notices and install notes | `cargo package-release`; `xtask/tests/release_package.rs` |
 | The packaged binaries actually run | `cargo smoke <dir>`; verified on `x86_64-pc-windows-msvc` |
 | Install, PATH, upgrade and uninstall are documented for the user | generated `INSTALL.md` |
+| Windows installs with one command: Start Menu entry, PATH, in-place upgrade, reversible uninstall | `installer/install.ps1`; `xtask/tests/release_package.rs` — it parses, it never writes the machine environment, and the Windows release carries it |
 | Process, platforms and signing | `docs/release.md` |
 
 **Limits, and the honest bottom line.** The macOS and Linux targets in `docs/release.md` have not
 been built or smoke-tested — only Windows has. Nothing is signed or notarised; the layout is
-ready for someone with the keys. The by-hand items in `docs/release.md` — hearing playback,
-opening an export elsewhere, deleting the directory — have not been recorded on any machine yet,
+ready for someone with the keys — so the installer, like the binaries, trips SmartScreen on a
+machine that has not seen it before. The by-hand items in `docs/release.md` — hearing playback,
+opening an export elsewhere — have not been recorded on any machine yet,
 and no accessibility audit with real assistive technology has been run. Those four gaps are
 tracked as `tasks/misc/M01`–`M04` rather than left in prose.

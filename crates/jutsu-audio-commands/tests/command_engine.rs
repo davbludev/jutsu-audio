@@ -36,6 +36,7 @@ fn project() -> Project {
             id: TrackId::new(),
             name: "SFX".into(),
             output_bus_id: bus_id,
+            sends: Vec::new(),
             parameters: BTreeMap::new(),
             layers: vec![Layer {
                 id: LayerId::new(),

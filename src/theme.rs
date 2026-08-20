@@ -50,6 +50,14 @@ pub fn configure(context: &egui::Context) {
     }
     context.set_fonts(fonts);
 
+    // The timeline owns Ctrl+wheel. egui otherwise takes that gesture for its
+    // own interface zoom and never puts it in the scroll delta, which left the
+    // timeline's zoom branch unreachable. Interface zoom stays on the keyboard:
+    // Ctrl +, Ctrl -, Ctrl 0.
+    context.options_mut(|options| {
+        options.input_options.zoom_modifier = egui::Modifiers::NONE;
+    });
+
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PANEL;
     visuals.window_fill = PANEL;

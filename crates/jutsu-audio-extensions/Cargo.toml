@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 jutsu-audio-model = { path = "../jutsu-audio-model" }
+rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 

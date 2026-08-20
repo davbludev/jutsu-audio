@@ -8,7 +8,14 @@ pub mod tempo;
 
 pub use tempo::{DEFAULT_BEATS_PER_MINUTE, MusicalPosition, TICKS_PER_BEAT, TempoChange, TempoMap};
 
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 2;
+
+/// Version 1 is every project written before automation could name an effect
+/// insert. Nothing in a version 1 document is invalid at version 2 — the
+/// migration is a stamp, not a rewrite — but the number still has to move, or
+/// an older build would meet a lane it cannot parse and fail with a
+/// deserialisation error instead of saying plainly that the file is newer.
+pub const AUTOMATION_TARGETS_SCHEMA_VERSION: u32 = 2;
 
 macro_rules! entity_id {
     ($name:ident) => {
@@ -38,6 +45,16 @@ macro_rules! entity_id {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
+            }
+        }
+
+        /// Parsing the text an ID prints as. A parameter that names an entity
+        /// carries it as a string, and the round trip has to close somewhere.
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                value.parse::<Uuid>().map(Self)
             }
         }
 
@@ -106,9 +123,21 @@ pub struct Pattern {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationTarget {
-    Track { track_id: TrackId },
-    Bus { bus_id: BusId },
-    Clip { clip_id: ClipId },
+    Track {
+        track_id: TrackId,
+    },
+    Bus {
+        bus_id: BusId,
+    },
+    Clip {
+        clip_id: ClipId,
+    },
+    /// One insert's own parameter — a filter cutoff, a delay time. The insert
+    /// is named rather than its position in a chain, so reordering the chain
+    /// does not silently move a lane onto a different effect.
+    Effect {
+        effect_id: EffectId,
+    },
 }
 
 /// How a value travels from one breakpoint to the next.
@@ -369,6 +398,19 @@ impl Project {
             }
         }
 
+        for (track_index, track) in self.tracks.iter().enumerate() {
+            for (send_index, send) in track.sends.iter().enumerate() {
+                if !bus_ids.contains(&send.bus_id) {
+                    diagnostics.push(ValidationDiagnostic::new(
+                        ValidationCode::MissingBusReference,
+                        format!("tracks[{track_index}].sends[{send_index}].bus_id"),
+                        Some(track.id.to_string()),
+                        "send targets a bus that does not exist",
+                    ));
+                }
+            }
+        }
+
         for (lane_index, lane) in self.automation.iter().enumerate() {
             let exists = match lane.target {
                 AutomationTarget::Track { track_id } => {
@@ -381,6 +423,12 @@ impl Project {
                     .flat_map(|track| &track.layers)
                     .flat_map(|layer| &layer.clips)
                     .any(|clip| clip.id == clip_id),
+                AutomationTarget::Effect { effect_id } => self
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.effects)
+                    .chain(self.buses.iter().flat_map(|bus| &bus.effects))
+                    .any(|insert| insert.id == effect_id),
             };
             if !exists {
                 diagnostics.push(ValidationDiagnostic::new(
@@ -621,6 +669,12 @@ pub struct Track {
     pub id: TrackId,
     pub name: String,
     pub output_bus_id: BusId,
+    /// Copies of this track's signal sent somewhere else, on top of wherever
+    /// its output goes. This is what puts a track in a reverb without putting
+    /// the reverb on the track: the dry signal still arrives at the output, and
+    /// a wet copy arrives at the bus the send names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<SendRoute>,
     #[serde(default)]
     pub parameters: BTreeMap<String, ParameterValue>,
     #[serde(default)]
@@ -629,6 +683,27 @@ pub struct Track {
     /// when empty, so a project without effects is unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<EffectInsert>,
+}
+
+/// A copy of a strip's signal, sent to a bus at its own level.
+///
+/// `SendRoute` rather than `Send`: the bare name is std's marker trait, and a
+/// model type that shadows it reads as a mistake in every generic position.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SendRoute {
+    pub bus_id: BusId,
+    /// How loud the copy is. Zero is unity — a send at unity is as loud as the
+    /// signal it copies.
+    #[serde(default)]
+    pub gain_db: f64,
+    /// Taken before the track's own fader rather than after it.
+    ///
+    /// Post-fader is the ordinary case and the default: turning a track down
+    /// should turn down what it sends to the reverb too, or the tail stays
+    /// behind after the source has gone. Pre-fader is for the times that is
+    /// exactly what you want.
+    #[serde(default)]
+    pub pre_fader: bool,
 }
 
 /// One effect in a chain: what it is, how it is set, and how much of it is
@@ -649,6 +724,11 @@ pub struct EffectInsert {
     /// How much of the processed signal is heard, `0.0` dry to `1.0` wet.
     #[serde(default = "fully_wet")]
     pub wet: f64,
+    /// The track this insert listens to instead of its own input, when it is
+    /// the kind of effect that listens — a compressor ducking a bass under a
+    /// kick. `None` is the ordinary case: an effect hears what it processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidechain: Option<TrackId>,
 }
 
 const fn enabled_by_default() -> bool {

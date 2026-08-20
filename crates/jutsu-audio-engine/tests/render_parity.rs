@@ -61,6 +61,7 @@ fn insert(type_id: &str, parameters: &[(&str, f64)]) -> EffectInsert {
             .collect(),
         enabled: true,
         wet: 0.8,
+        sidechain: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn track(name: &str, output: BusId, clips: Vec<Clip>, effects: Vec<EffectInsert>
         id: TrackId::new(),
         name: name.into(),
         output_bus_id: output,
+        sends: Vec::new(),
         parameters: BTreeMap::from([("pan".into(), ParameterValue::Float(-0.3))]),
         layers: vec![Layer {
             id: LayerId::new(),

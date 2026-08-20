@@ -99,6 +99,12 @@ impl Effect for OnePole {
         self.state = 0.0;
     }
 
+    fn set_parameter(&mut self, id: &str, value: f64) {
+        if id == "cutoff_hz" {
+            self.cutoff_hz = value;
+        }
+    }
+
     fn process(&mut self, samples: &mut [f32]) {
         // Clamped below Nyquist: a cutoff at or above it would make the
         // coefficient meaningless rather than merely extreme.

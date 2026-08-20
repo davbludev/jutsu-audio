@@ -202,6 +202,21 @@ pub enum ProjectCommand {
         effect_id: EffectId,
         enabled: bool,
     },
+    /// Replaces a track's sends, all of them, in one step.
+    ///
+    /// The whole list rather than one send at a time: a send has no identity of
+    /// its own — it is a destination and a level — so there is nothing stable
+    /// to address a single one by.
+    SetTrackSends {
+        track_id: TrackId,
+        sends: Vec<jutsu_audio_model::SendRoute>,
+    },
+    /// Which track an insert listens to instead of its own input. `None`
+    /// takes the sidechain off again.
+    SetEffectSidechain {
+        effect_id: EffectId,
+        track_id: Option<TrackId>,
+    },
     /// How much of the processed signal is heard, `0.0` dry to `1.0` wet.
     SetEffectWet {
         effect_id: EffectId,
@@ -964,6 +979,48 @@ pub(crate) fn apply_command(
         ProjectCommand::SetEffectEnabled { effect_id, enabled } => {
             let (chain, index) = locate_effect(project, *effect_id, command_index)?;
             chain[index].enabled = *enabled;
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Effect,
+                entity_id: effect_id.to_string(),
+            }
+        }
+        ProjectCommand::SetTrackSends { track_id, sends } => {
+            let track = project
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == *track_id)
+                .ok_or_else(|| {
+                    CommandError::at_command(
+                        CommandErrorCode::EntityNotFound,
+                        command_index,
+                        format!("track {track_id} does not exist"),
+                    )
+                })?;
+            track.sends = sends.clone();
+            ChangeEvent {
+                sequence: 0,
+                kind: ChangeKind::Updated,
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+            }
+        }
+        ProjectCommand::SetEffectSidechain {
+            effect_id,
+            track_id,
+        } => {
+            if let Some(track_id) = track_id
+                && !project.tracks.iter().any(|track| track.id == *track_id)
+            {
+                return Err(CommandError::at_command(
+                    CommandErrorCode::EntityNotFound,
+                    command_index,
+                    format!("track {track_id} does not exist"),
+                ));
+            }
+            let (chain, index) = locate_effect(project, *effect_id, command_index)?;
+            chain[index].sidechain = *track_id;
             ChangeEvent {
                 sequence: 0,
                 kind: ChangeKind::Updated,

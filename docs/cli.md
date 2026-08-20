@@ -4,6 +4,26 @@
 
 Operations: `create_project`, `inspect_project`, `import_sample`, `add_clip`, `update_clip`, `delete_clip`, `export_wav`, `transport_request`, and `session_status`. Requests use snake_case tagged JSON with `protocol_version: 1`. Inspect output provides the complete project and the default `track_id`/`layer_id` needed for clip commands. `export_wav` accepts `encoding` (`pcm16` or `float32`) plus optional `start_frame` and `frame_count`.
 
+## MCP
+
+`jutsu-audio-cli --mcp` serves the same operations over the Model Context Protocol on stdin and
+stdout — newline-delimited JSON-RPC, one message per line, for an agent that keeps the
+connection open instead of spawning a process per request. Register it once:
+
+```bash
+claude mcp add --scope user jutsu-audio -- "%LOCALAPPDATA%\Programs\JutsuAudio\jutsu-audio-cli.exe" --mcp
+```
+
+It exposes two tools, not sixty: `jutsu_audio_describe` is `describe_protocol`, and
+`jutsu_audio_request` takes one request object and answers with its envelope. A tool per
+operation would be a second copy of the operation table, and the copy would drift; the protocol
+already describes itself, so discovery is one call.
+
+Nothing about the operations changes. Requests go through `cli::execute_json`, which means the
+same session routing (a live editor still owns its project), the same locking, the same atomic
+edits. A refused request comes back with `isError` set and the envelope's own `error` inside it,
+because a refusal is a result the caller should read, not a transport failure.
+
 ## Discovery
 
 `describe_protocol` takes no project and answers what this build accepts: every operation with a
@@ -69,8 +89,8 @@ The protocol behind this is `docs/design/jutsu-audio-session-protocol-v1.md`.
 
 ## Tracks, layers and the mix
 
-`add_track` appends a track with one empty layer and returns both IDs; `add_layer` appends a lane
-to a named track. `set_track_mute`, `set_track_solo` and `set_clip_pan` change how a project
+`add_track` appends a track with one empty layer and returns both IDs; `remove_track` takes one
+away with everything on it; `add_layer` appends a lane to a named track. `set_track_mute`, `set_track_solo` and `set_clip_pan` change how a project
 sums: solo wins over mute, pan runs `-1.0` (hard left) to `1.0` (hard right), and centre is unity
 in both channels.
 
@@ -98,6 +118,12 @@ that is gone — exit `4` with `command_failed` and change nothing.
 have stable IDs and keep them when they move. `set_loop_region` takes `start_frame`, `end_frame`
 and an optional `enabled` (default `true`); `clear_loop_region` forgets the region entirely,
 while `enabled: false` remembers where it was without playing it.
+
+`export_wav` reports `loudness`: `integrated_lufs` (ITU-R BS.1770-4, both gates applied),
+`sample_peak_dbfs` and `true_peak_dbfs` from a four-times oversampled peak. A delivery target is
+stated in those numbers, so the export answers in them rather than leaving the question to
+whatever opens the file next. `integrated_lufs` is `null` for silence, which has no loudness
+rather than a very small one, and the peaks are `null` for the same reason.
 
 `export_wav` reports `diagnostics`: anything the mix had to work around — a sample that will not
 decode, an extension this build does not have. The export still runs and still writes a file; a
@@ -157,6 +183,14 @@ parameters are, so the CLI and the editor accept and refuse the same values.
 Routing: `add_bus`, `set_track_output`, `set_bus_output`. Levels: `set_track_parameter`,
 `set_bus_parameter`.
 
+Sends: `set_track_sends` replaces a track's parallel sends in one command — each is a `bus_id`,
+a `gain_db` and an optional `pre_fader`. A send adds a copy of the track to that bus without
+taking anything away from where the track already goes, which is what puts a signal in a reverb
+while keeping it dry as well. Post-fader is the default, so turning a track down turns down what
+it feeds the reverb; `pre_fader: true` is for when it should not. Sends come from tracks, not
+from buses: every track is summed before any bus folds, so a track send never has to care what
+order the buses are in.
+
 Effects: `describe_effect` gives one effect's schema and presets; `add_effect` (with either
 `{"track": {"track_id": …}}` or `{"bus": {"bus_id": …}}`), `remove_effect`, `move_effect`,
 `set_effect_enabled`, `set_effect_wet` and `set_effect_parameters` manage a chain. Order is what a
@@ -165,6 +199,18 @@ chain is, so `move_effect` is an ordinary edit.
 Automation: `add_automation_lane` takes a target, a parameter and optional breakpoints;
 `set_automation_points` replaces a lane's curve in one command, and `remove_automation_lane`
 deletes it. Points are stored in frame order whatever order they arrive in.
+
+A target is `{"type": "track", "track_id": …}`, `{"type": "bus", …}`, `{"type": "clip", …}` or
+`{"type": "effect", "effect_id": …}`. Track, bus and clip lanes write `gain_db` and `pan`; an
+effect lane writes any parameter that insert declares, which is how a filter sweeps. The insert
+is named by ID rather than by position, so reordering a chain never moves a lane onto a
+different effect. Parameters are applied once per 1024-frame block — a sweep is heard as a
+sweep, and nothing recomputes a filter coefficient forty-eight thousand times a second.
+
+Sidechain: `add_effect` takes an optional `sidechain` naming a track, and `set_effect_sidechain`
+points an existing insert at one or removes it again. An insert with a key hears that track
+rather than its own input, which is how a bass ducks under a kick. The key is the track after
+its own fader, and a key naming a track this mix does not have is simply no key at all.
 
 ## Musical time
 
@@ -229,6 +275,35 @@ Incompatibilities are reported rather than assumed: a preset saved at another st
 applied and listed in the response's `incompatibilities`, while a preset written by a newer build
 of the format is refused with `incompatible_preset`, because guessing at a format you do not know
 is worse than saying so.
+
+## Stems, loops and variations
+
+`export_stems` writes one WAV per track into a directory, from the same render the master comes
+out of — one pass, so a stem and the master cannot disagree. Each is that track after its own
+inserts and its own fader and before any bus touches it, which is what another tool expects a
+stem to be; they sum back to the master when the buses are doing nothing else. Files are named
+`01-track-name.wav`, and the response carries the loudness of each.
+
+`export_wav` writes the project's loop region into the file as a `smpl` chunk when the export
+covers it, and reports it as `loop_points`. With `use_loop_region: true` the whole file is the
+loop. That is the chunk samplers and game engines read, and a reader that does not know it skips
+it, so the file is an ordinary WAV either way.
+
+`run_generator_variations` runs one recipe as several seeds and places them in turn: `variations`
+says how many versions, `placements` says where they go, and the set cycles. A repeated one-shot
+that is bit-identical every time is the oldest tell in game audio, and this is the cheapest way
+out of it. Variation *n* uses `seed + n`, so the set is exactly as reproducible as one sound is.
+
+## Convolution
+
+`builtin.convolution` convolves a strip with an impulse response — a recording of how a real
+space answers a click. Its `impulse_asset` parameter holds the ID of an asset in the project, as
+text; the mix loads that asset, folds it to mono and hands it to the effect, because extensions
+do not read files. `pre_delay_ms` puts distance before the response and `output_db` sets its
+level; the insert's own `wet` is the dry/wet balance.
+
+An insert whose impulse is missing passes its audio through and says so in the export's
+`diagnostics` rather than silencing the strip.
 
 ## Bundles and relinking
 

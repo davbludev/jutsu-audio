@@ -8,9 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub mod builtin;
 pub mod conformance;
 pub mod effects;
+pub mod filter;
 pub mod generators;
 pub mod parameters;
 pub mod recipe;
+pub mod subtractive;
 pub mod voice;
 
 pub use builtin::register_builtin;
@@ -18,7 +20,7 @@ pub use effects::register_builtin_effects;
 pub use generators::{GeneratorPreset, register_sfx_generators};
 pub use parameters::{strip_parameters, validate_named, validate_value};
 pub use recipe::{GeneratorRecipe, RECIPE_CONTRACT_VERSION, RegenerateMode};
-pub use voice::{Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
+pub use voice::{Adsr, Envelope, MAX_POLYPHONY, Noise, NoteEvent, NoteEventKind, VoiceStage};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -202,6 +204,47 @@ pub trait Effect: Send {
     fn reset(&mut self);
 
     fn process(&mut self, samples: &mut [f32]);
+
+    /// Applies one parameter to an instance that is already running.
+    ///
+    /// The host calls this before a block whenever an automation lane writes to
+    /// this insert, and calls it with `tempo_bpm` whenever the project's tempo
+    /// is known — an effect that does not care about tempo ignores it. The
+    /// default does nothing, so an extension written before parameters could
+    /// move still renders: it simply keeps the settings it was built with.
+    ///
+    /// Called between blocks, never inside one, and never from the audio
+    /// callback: it may not allocate, but it may recompute coefficients.
+    fn set_parameter(&mut self, _id: &str, _value: f64) {}
+
+    /// Processes a block against a separate signal to listen to.
+    ///
+    /// A compressor given a kick drum here ducks whatever it is inserted on
+    /// whenever the kick hits, which is most of what modern mixes mean by
+    /// movement. `key` is the same length as `samples`.
+    ///
+    /// The default ignores the key and processes normally, so an effect that
+    /// has no use for one — a filter, a delay — needs to know nothing about
+    /// this.
+    fn process_with_key(&mut self, samples: &mut [f32], _key: &[f32]) {
+        self.process(samples);
+    }
+
+    /// Hands the effect an impulse response to work with.
+    ///
+    /// Extensions do not read files — the host loads the asset an insert names
+    /// and passes the samples here, mono, at `sample_rate`. Called after
+    /// `prepare` and before the first block. The default ignores it, which is
+    /// what every effect that is not a convolver wants.
+    fn set_impulse(&mut self, _samples: &[f32], _sample_rate: u32) {}
+
+    /// Which channel of the strip this instance renders, counted from zero.
+    ///
+    /// The chain gives every channel its own instance, so an effect that wants
+    /// stereo width — a chorus, a widener — needs to know which side it is, or
+    /// both sides move identically and the width is imaginary. Called once,
+    /// after `prepare`.
+    fn set_channel(&mut self, _channel: u16) {}
 
     fn latency_frames(&self) -> u32 {
         0

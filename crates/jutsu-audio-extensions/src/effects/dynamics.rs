@@ -39,6 +39,7 @@ pub fn compressor_factory() -> BuiltinEffectFactory {
         ],
         |settings| {
             Box::new(Compressor {
+                sample_rate: 48_000,
                 threshold_db: settings.float("threshold_db"),
                 ratio: settings.float("ratio").max(1.0),
                 attack_ms: settings.float("attack_ms"),
@@ -81,6 +82,7 @@ fn compressor_descriptor() -> ExtensionDescriptor {
 }
 
 struct Compressor {
+    sample_rate: u32,
     threshold_db: f64,
     ratio: f64,
     attack_ms: f64,
@@ -94,6 +96,7 @@ struct Compressor {
 
 impl Effect for Compressor {
     fn prepare(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate.max(1);
         self.attack = coefficient(self.attack_ms, sample_rate);
         self.release = coefficient(self.release_ms, sample_rate);
         self.reset();
@@ -103,12 +106,49 @@ impl Effect for Compressor {
         self.envelope = 0.0;
     }
 
+    fn set_parameter(&mut self, id: &str, value: f64) {
+        match id {
+            "threshold_db" => self.threshold_db = value,
+            "ratio" => self.ratio = value.max(1.0),
+            "makeup_db" => self.makeup = from_decibels(value),
+            // The time constants are coefficients rather than values, so they
+            // are recomputed here rather than read in the loop.
+            "attack_ms" => {
+                self.attack_ms = value;
+                self.attack = coefficient(value, self.sample_rate);
+            }
+            "release_ms" => {
+                self.release_ms = value;
+                self.release = coefficient(value, self.sample_rate);
+            }
+            _ => {}
+        }
+    }
+
     fn process(&mut self, samples: &mut [f32]) {
+        // Its own input is the key, which is what a compressor without a
+        // sidechain is: one that listens to itself.
+        self.compress(samples, None);
+    }
+
+    fn process_with_key(&mut self, samples: &mut [f32], key: &[f32]) {
+        self.compress(samples, Some(key));
+    }
+}
+
+impl Compressor {
+    /// One gain computer for both ways in. Nothing is allocated: the key is
+    /// borrowed where there is one, and the input is the detector where there
+    /// is not.
+    fn compress(&mut self, samples: &mut [f32], key: Option<&[f32]>) {
         let threshold = from_decibels(self.threshold_db);
         let ratio = self.ratio.max(1.0) as f32;
 
-        for sample in samples {
-            let level = sample.abs();
+        for (index, sample) in samples.iter_mut().enumerate() {
+            let level = key.map_or_else(
+                || sample.abs(),
+                |key| key.get(index).copied().unwrap_or(0.0).abs(),
+            );
             // Rise fast on the attack coefficient, fall on the release one:
             // that asymmetry is what makes a compressor sound like one.
             let coefficient = if level > self.envelope {

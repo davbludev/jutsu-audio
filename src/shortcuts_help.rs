@@ -43,6 +43,8 @@ pub const GROUPS: &[Group] = &[
         title: "View",
         keys: &[
             ("+ / -", "Zoom the timeline in and out"),
+            ("Ctrl+wheel", "Zoom the timeline around the pointer"),
+            ("Shift+wheel", "Scroll the timeline sideways"),
             ("F", "Fit the whole project on screen"),
             (
                 "Ctrl + / Ctrl -",

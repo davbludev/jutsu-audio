@@ -1,0 +1,4 @@
+// The Windows icon resource. Resource id 1 is what Explorer, the taskbar and a
+// shortcut all read as "the application's icon"; the window's own icon is set
+// at runtime instead, because winit leaves the window class icon empty.
+1 ICON "jutsu-audio.ico"

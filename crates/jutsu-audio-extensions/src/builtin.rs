@@ -20,6 +20,7 @@ use crate::{
 pub fn register_builtin(registries: &mut ExtensionRegistries) -> Result<(), ExtensionError> {
     registries.register_synth(Arc::new(OscillatorFactory))?;
     registries.register_synth(Arc::new(NoiseFactory))?;
+    registries.register_synth(Arc::new(crate::subtractive::factory()))?;
     Ok(())
 }
 
@@ -38,7 +39,7 @@ pub fn noise_type_id() -> ExtensionTypeId {
 /// The shape an oscillator voice traces. Text rather than an integer so a
 /// project file says `"square"`, not `2`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Waveform {
+pub(crate) enum Waveform {
     Sine,
     Triangle,
     Saw,
@@ -46,7 +47,7 @@ enum Waveform {
 }
 
 impl Waveform {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "sine" => Some(Self::Sine),
             "triangle" => Some(Self::Triangle),
@@ -57,7 +58,7 @@ impl Waveform {
     }
 
     /// One cycle, phase in `0.0..1.0`.
-    fn sample(self, phase: f64) -> f32 {
+    pub(crate) fn sample(self, phase: f64) -> f32 {
         let value = match self {
             Self::Sine => (phase * std::f64::consts::TAU).sin(),
             Self::Triangle => 4.0 * (phase - (phase + 0.5).floor()).abs() - 1.0,
@@ -343,7 +344,7 @@ impl SynthFactory for NoiseFactory {
 }
 
 /// What a synth renders at until `prepare` says otherwise.
-const DEFAULT_SAMPLE_RATE: u32 = 48_000;
+pub(crate) const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 
 fn gain_db() -> ParameterDescriptor {
     ParameterDescriptor {
@@ -373,7 +374,7 @@ fn envelope_time(id: &str, display_name: &str, default_ms: f64) -> ParameterDesc
     }
 }
 
-fn text(id: &str, display_name: &str, default_value: &str) -> ParameterDescriptor {
+pub(crate) fn text(id: &str, display_name: &str, default_value: &str) -> ParameterDescriptor {
     ParameterDescriptor {
         id: id.into(),
         display_name: display_name.into(),
@@ -387,20 +388,28 @@ fn text(id: &str, display_name: &str, default_value: &str) -> ParameterDescripto
     }
 }
 
-fn float_value(parameters: &BTreeMap<String, ParameterValue>, id: &str, fallback: f64) -> f64 {
+pub(crate) fn float_value(
+    parameters: &BTreeMap<String, ParameterValue>,
+    id: &str,
+    fallback: f64,
+) -> f64 {
     match parameters.get(id) {
         Some(ParameterValue::Float(value)) => *value,
         _ => fallback,
     }
 }
 
-fn text_value(parameters: &BTreeMap<String, ParameterValue>, id: &str, fallback: &str) -> String {
+pub(crate) fn text_value(
+    parameters: &BTreeMap<String, ParameterValue>,
+    id: &str,
+    fallback: &str,
+) -> String {
     match parameters.get(id) {
         Some(ParameterValue::Text(value)) => value.clone(),
         _ => fallback.to_owned(),
     }
 }
 
-fn decibels_to_gain(decibels: f64) -> f32 {
+pub(crate) fn decibels_to_gain(decibels: f64) -> f32 {
     10_f32.powf(decibels as f32 / 20.0)
 }

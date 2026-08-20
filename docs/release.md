@@ -10,6 +10,12 @@ cargo smoke dist/jutsu-audio-<version>-<target>      # run what was just built
 release directory with `docs/cli.md` and `docs/extension-sdk.md`, and generates `INSTALL.md`,
 `THIRD-PARTY-NOTICES.md` and `SHA256SUMS`. The code is `xtask/src/package.rs`.
 
+A Windows release also carries `installer/install.ps1`, which copies the directory to
+`%LOCALAPPDATA%\Programs\JutsuAudio`, adds the Start Menu shortcut and puts the directory on the
+user's own PATH — per-user throughout, so it never needs elevation and never writes the
+machine-wide environment. `-Uninstall` takes all three back. The other targets ship no installer;
+their `INSTALL.md` describes unpacking and a shell profile instead.
+
 ## Declared platforms
 
 One release directory per platform, built on that platform:
@@ -56,8 +62,12 @@ By hand, on a machine that has never built this, once per platform:
    playback is unavailable, and **Try again** works once a device is plugged in.
 4. Import a WAV, place a clip, press play, hear it.
 5. Export a WAV and open it somewhere else.
-6. Put the directory on PATH and run `jutsu-audio-cli --version` from another folder.
-7. Delete the directory. Confirm projects, exports and preset libraries elsewhere are untouched.
+6. Windows: run `install.ps1`. The Start Menu entry launches the editor, and
+   `jutsu-audio-cli --version` answers from a new terminal in another folder. Elsewhere: put
+   the directory on PATH by hand and check the same thing.
+7. Windows: run `install.ps1 -Uninstall`; the shortcut, the PATH entry and the directory are
+   all gone. Elsewhere: delete the directory. Either way, confirm projects, exports and preset
+   libraries elsewhere are untouched.
 
 ## Version numbers
 

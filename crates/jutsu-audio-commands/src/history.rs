@@ -418,6 +418,25 @@ fn invert_command(
                 enabled: effect.enabled,
             }
         }
+        ProjectCommand::SetTrackSends { track_id, .. } => {
+            let track = project
+                .tracks
+                .iter()
+                .find(|track| track.id == *track_id)
+                .ok_or_else(|| missing(format!("track {track_id} does not exist")))?;
+            ProjectCommand::SetTrackSends {
+                track_id: *track_id,
+                sends: track.sends.clone(),
+            }
+        }
+        ProjectCommand::SetEffectSidechain { effect_id, .. } => {
+            let (_, effect, _) = find_effect(project, *effect_id)
+                .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;
+            ProjectCommand::SetEffectSidechain {
+                effect_id: *effect_id,
+                track_id: effect.sidechain,
+            }
+        }
         ProjectCommand::SetEffectWet { effect_id, .. } => {
             let (_, effect, _) = find_effect(project, *effect_id)
                 .ok_or_else(|| missing(format!("effect {effect_id} does not exist")))?;

@@ -69,6 +69,20 @@ pub fn plan(version: &str, target: &str) -> ReleasePlan {
     } else {
         ""
     };
+    let mut documents: Vec<(String, String)> = vec![
+        ("docs/cli.md".into(), "docs/cli.md".into()),
+        (
+            "docs/extension-sdk.md".into(),
+            "docs/extension-sdk.md".into(),
+        ),
+    ];
+    // The installer is PowerShell, so it travels with the Windows release and
+    // only that one. The other platforms have no equivalent yet; unpacking and
+    // editing a shell profile is what their install notes describe.
+    if target.contains("windows") {
+        documents.push(("install.ps1".into(), "installer/install.ps1".into()));
+    }
+
     ReleasePlan {
         package_name: "jutsu-audio".into(),
         version: version.to_owned(),
@@ -77,13 +91,7 @@ pub fn plan(version: &str, target: &str) -> ReleasePlan {
             (format!("jutsu-audio{suffix}"), "jutsu-audio".into()),
             (format!("jutsu-audio-cli{suffix}"), "jutsu-audio-cli".into()),
         ],
-        documents: vec![
-            ("docs/cli.md".into(), "docs/cli.md".into()),
-            (
-                "docs/extension-sdk.md".into(),
-                "docs/extension-sdk.md".into(),
-            ),
-        ],
+        documents,
     }
 }
 
@@ -163,24 +171,73 @@ pub fn notices(dependencies: &[Dependency]) -> String {
     text
 }
 
+/// What a Windows release says about installing, PATHing and removing itself:
+/// one script does all three, so the notes describe running it rather than
+/// editing the environment by hand.
+const WINDOWS_INSTALL: &str = "## Install\n\
+     \n\
+     Run the installer from this directory:\n\
+     \n\
+     ```powershell\n\
+     powershell -ExecutionPolicy Bypass -File .\\install.ps1\n\
+     ```\n\
+     \n\
+     It copies the application to `%LOCALAPPDATA%\\Programs\\JutsuAudio`, adds **Jutsu Audio**\n\
+     to the Start Menu, and puts the command-line tool on your PATH. Everything it writes is\n\
+     inside your own profile, so it never asks for administrator rights and installs nothing\n\
+     system-wide — no registry keys, no system directories, no services.\n\
+     \n\
+     - `-Destination <path>` installs somewhere else.\n\
+     - Running it again over an existing installation upgrades that installation in place.\n\
+     \n\
+     None of this is required. Everything lives in this directory: put it where you keep\n\
+     applications and run `jutsu-audio.exe` if you would rather manage it yourself.\n\
+     \n\
+     Open a new terminal after installing, then check the command-line tool answers:\n\
+     \n\
+     ```powershell\n\
+     jutsu-audio-cli --version\n\
+     ```\n";
+
+/// The same for the platforms with no installer yet: unpack it, and say plainly
+/// what to put in a shell profile.
+const MANUAL_INSTALL: &str = "## Install\n\
+     \n\
+     Everything lives in this directory. Put it where you keep applications and run\n\
+     `jutsu-audio`. Nothing is written outside it at install time — no system directories,\n\
+     no services.\n\
+     \n\
+     ## The command-line tool on your PATH\n\
+     \n\
+     `jutsu-audio-cli` reads one JSON request on stdin and writes one JSON response on stdout\n\
+     (`docs/cli.md`). To call it by name from anywhere, add this directory to your PATH with\n\
+     `export PATH=\"$PATH:<this directory>\"` in your shell profile.\n\
+     \n\
+     Check it worked:\n\
+     \n\
+     ```bash\n\
+     jutsu-audio-cli --version\n\
+     ```\n";
+
+/// Undoing a Windows install is the installer's own job; undoing a manual one
+/// is deleting a directory.
+const WINDOWS_UNINSTALL: &str = "Run the installer again with `-Uninstall`, from wherever it was installed:\n\
+         \n\
+         ```powershell\n\
+         powershell -ExecutionPolicy Bypass -File \"$env:LOCALAPPDATA\\Programs\\JutsuAudio\\install.ps1\" -Uninstall\n\
+         ```\n\
+         \n\
+         That takes back the Start Menu entry, the PATH entry and the directory itself. If you\n\
+         unpacked it by hand instead, deleting the directory is the whole job.";
+
 /// The install, upgrade and uninstall notes that travel with a release.
 #[must_use]
 pub fn install_notes(plan: &ReleasePlan) -> String {
-    let binaries: Vec<&str> = plan
-        .binaries
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let windows = plan.target.contains("windows");
     format!(
         "# Installing Jutsu Audio {version}\n\
          \n\
          Target: `{target}`\n\
-         \n\
-         ## Install\n\
-         \n\
-         Everything lives in this directory. Put it where you keep applications and run\n\
-         `{editor}`. Nothing is written outside it at install time — no registry keys, no\n\
-         system directories, no services.\n\
          \n\
          Verify the download first:\n\
          \n\
@@ -188,19 +245,7 @@ pub fn install_notes(plan: &ReleasePlan) -> String {
          sha256sum --check SHA256SUMS\n\
          ```\n\
          \n\
-         ## The command-line tool on your PATH\n\
-         \n\
-         `{cli}` reads one JSON request on stdin and writes one JSON response on stdout\n\
-         (`docs/cli.md`). To call it by name from anywhere, add this directory to your PATH:\n\
-         \n\
-         - **Windows**: `setx PATH \"%PATH%;<this directory>\"`, then open a new terminal.\n\
-         - **macOS / Linux**: add `export PATH=\"$PATH:<this directory>\"` to your shell profile.\n\
-         \n\
-         Check it worked:\n\
-         \n\
-         ```bash\n\
-         jutsu-audio-cli --version\n\
-         ```\n\
+         {install}\
          \n\
          ## First run: audio output\n\
          \n\
@@ -212,7 +257,7 @@ pub fn install_notes(plan: &ReleasePlan) -> String {
          \n\
          ## Upgrading\n\
          \n\
-         Unpack the new version beside the old one and delete the old directory. Projects are\n\
+         Unpack the new version and install it over the old one. Projects are\n\
          forward-compatible in one direction only: a newer build migrates an older project and\n\
          keeps the original beside it as a `.backup.v<version>` file, while an older build\n\
          refuses a project a newer one wrote rather than damaging it. Keep the old version until\n\
@@ -220,7 +265,7 @@ pub fn install_notes(plan: &ReleasePlan) -> String {
          \n\
          ## Uninstalling\n\
          \n\
-         Delete this directory. That removes the application completely.\n\
+         {uninstall}\n\
          \n\
          Your own files are never inside it, and are not touched:\n\
          \n\
@@ -234,8 +279,16 @@ pub fn install_notes(plan: &ReleasePlan) -> String {
          {contents}\n",
         version = plan.version,
         target = plan.target,
-        editor = binaries.first().copied().unwrap_or("jutsu-audio"),
-        cli = binaries.get(1).copied().unwrap_or("jutsu-audio-cli"),
+        install = if windows {
+            WINDOWS_INSTALL
+        } else {
+            MANUAL_INSTALL
+        },
+        uninstall = if windows {
+            WINDOWS_UNINSTALL
+        } else {
+            "Delete this directory. That removes the application completely."
+        },
         contents = plan
             .file_names()
             .iter()

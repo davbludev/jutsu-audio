@@ -5,10 +5,15 @@
 //! deterministic, allocation-free once prepared, and safe with any parameter
 //! value its descriptor allows.
 
+pub mod convolution;
 pub mod delay;
 pub mod dynamics;
+pub mod eq;
 pub mod filters;
+pub mod limiter;
+pub mod modulation;
 pub mod reverb;
+pub mod saturation;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,6 +35,11 @@ pub fn register_builtin_effects(
     registries.register_effect(Arc::new(dynamics::compressor_factory()))?;
     registries.register_effect(Arc::new(delay::factory()))?;
     registries.register_effect(Arc::new(reverb::factory()))?;
+    registries.register_effect(Arc::new(eq::factory()))?;
+    registries.register_effect(Arc::new(saturation::factory()))?;
+    registries.register_effect(Arc::new(modulation::factory()))?;
+    registries.register_effect(Arc::new(limiter::factory()))?;
+    registries.register_effect(Arc::new(convolution::factory()))?;
     Ok(())
 }
 

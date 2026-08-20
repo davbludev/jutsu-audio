@@ -130,6 +130,98 @@ impl Envelope {
     }
 }
 
+/// Attack, decay, sustain, release — the shape that lets a held note settle
+/// somewhere other than full level.
+///
+/// `Envelope` is the two-stage version and stays: an impact wants a ramp up and
+/// a ramp down and nothing in between. This one is for instruments, and is used
+/// twice per voice in the subtractive synth — once for level, once for the
+/// filter, with different times.
+#[derive(Clone, Copy, Debug)]
+pub struct Adsr {
+    pub stage: VoiceStage,
+    pub level: f32,
+    sustain: f32,
+    attack_per_frame: f32,
+    decay_per_frame: f32,
+    release_per_frame: f32,
+}
+
+impl Adsr {
+    /// Times in milliseconds; `sustain` is the level a held note settles at,
+    /// `0.0..1.0`.
+    #[must_use]
+    pub fn new(
+        sample_rate: u32,
+        attack_ms: f64,
+        decay_ms: f64,
+        sustain: f64,
+        release_ms: f64,
+    ) -> Self {
+        Self {
+            stage: VoiceStage::Idle,
+            level: 0.0,
+            sustain: sustain.clamp(0.0, 1.0) as f32,
+            attack_per_frame: per_frame(sample_rate, attack_ms),
+            decay_per_frame: per_frame(sample_rate, decay_ms),
+            release_per_frame: per_frame(sample_rate, release_ms),
+        }
+    }
+
+    pub fn trigger(&mut self) {
+        self.stage = VoiceStage::Attack;
+        self.level = 0.0;
+    }
+
+    pub fn release(&mut self) {
+        if self.stage != VoiceStage::Idle {
+            self.stage = VoiceStage::Release;
+        }
+    }
+
+    pub fn silence(&mut self) {
+        self.stage = VoiceStage::Idle;
+        self.level = 0.0;
+    }
+
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        !matches!(self.stage, VoiceStage::Idle)
+    }
+
+    /// Advances one frame and returns the level for it.
+    ///
+    /// Decay and sustain share `VoiceStage::Sustain`: from the outside there is
+    /// no difference between falling towards the sustain level and sitting on
+    /// it, and a fourth stage would only be a fourth thing to keep in step.
+    pub fn advance(&mut self) -> f32 {
+        match self.stage {
+            VoiceStage::Idle => 0.0,
+            VoiceStage::Attack => {
+                self.level = (self.level + self.attack_per_frame).min(1.0);
+                if self.level >= 1.0 {
+                    self.stage = VoiceStage::Sustain;
+                }
+                self.level
+            }
+            VoiceStage::Sustain => {
+                if self.level > self.sustain {
+                    self.level = (self.level - self.decay_per_frame).max(self.sustain);
+                }
+                self.level
+            }
+            VoiceStage::Release => {
+                self.level -= self.release_per_frame;
+                if self.level <= 0.0 {
+                    self.silence();
+                    return 0.0;
+                }
+                self.level
+            }
+        }
+    }
+}
+
 /// Per-frame step for a ramp of `milliseconds`. A zero or negative time ramps
 /// in one frame rather than dividing by zero.
 fn per_frame(sample_rate: u32, milliseconds: f64) -> f32 {
@@ -231,6 +323,31 @@ mod tests {
         for _ in 0..10_000 {
             let sample = noise.next_sample();
             assert!((-1.0..=1.0).contains(&sample), "{sample} is out of range");
+        }
+    }
+    #[test]
+    fn an_adsr_decays_to_its_sustain_level_and_holds_there() {
+        // A four-millisecond decay at 1 kHz falls a quarter of full scale per
+        // frame, so 1.0 reaches the 0.5 sustain in two of them.
+        let mut envelope = Adsr::new(1_000, 1.0, 4.0, 0.5, 1.0);
+        envelope.trigger();
+        assert_eq!(envelope.advance(), 1.0, "a one-frame attack is instant");
+
+        assert_eq!(envelope.advance(), 0.75);
+        assert_eq!(envelope.advance(), 0.5);
+        assert_eq!(envelope.advance(), 0.5, "and it stays there while held");
+
+        envelope.release();
+        assert_eq!(envelope.advance(), 0.0);
+        assert!(!envelope.is_active());
+    }
+
+    #[test]
+    fn a_full_sustain_adsr_never_decays() {
+        let mut envelope = Adsr::new(1_000, 0.0, 1.0, 1.0, 1.0);
+        envelope.trigger();
+        for _ in 0..16 {
+            assert_eq!(envelope.advance(), 1.0);
         }
     }
 }

@@ -71,12 +71,24 @@ const METER_DECAY: f32 = 0.90;
 /// leaving it to be noticed in a screenshot.
 const MIXER_PANEL_HEIGHT: f32 = 268.0;
 
+/// The window and taskbar icon. The same mark is compiled into the executable
+/// as a Windows resource (`build.rs`), which is what Explorer and a shortcut
+/// read; this one is for the running window, because winit leaves the window
+/// class icon empty and would otherwise show the system default.
+fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/jutsu-audio-256.png")).ok()
+}
+
 fn main() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1536.0, 900.0])
+        .with_min_inner_size([1040.0, 620.0])
+        .with_title("Jutsu Audio");
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1536.0, 900.0])
-            .with_min_inner_size([1040.0, 620.0])
-            .with_title("Jutsu Audio"),
+        viewport,
         ..Default::default()
     };
     // `jutsu-audio path/to/project.json` opens that project instead of a new one,
@@ -376,6 +388,7 @@ impl JutsuAudioApp {
     /// Appends a track with one empty layer, ready to drop a sample onto.
     fn add_track(&mut self) {
         let track = jutsu_audio_model::Track {
+            sends: Vec::new(),
             id: TrackId::new(),
             name: format!("Track {}", self.project().tracks.len() + 1),
             output_bus_id: self.project().master_bus_id,
@@ -1905,6 +1918,9 @@ impl JutsuAudioApp {
             parameters: BTreeMap::new(),
             enabled: true,
             wet: 1.0,
+            // A key is a routing decision, and the editor has no way to make
+            // one yet: the CLI's set_effect_sidechain is where that lives.
+            sidechain: None,
         })
     }
 
@@ -2148,30 +2164,22 @@ impl JutsuAudioApp {
                 };
                 let Some(edit) = self.edit else { return };
 
-                // Everything below the header lives in an explicitly bounded,
-                // padded rect. Without one, right-aligned rows anchor to the
-                // parent's unbounded width and spill outside the panel.
-                let body = ui
-                    .available_rect_before_wrap()
-                    .shrink2(Vec2::new(INSPECTOR_PADDING, 0.0));
-                let outcome = ui
-                    .scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
-                        self.inspector_body(ui, &clip, edit, rate)
-                    })
-                    .inner;
-
                 // The synth section only exists for a clip that plays one, and
                 // is built from the extension's own descriptor.
-                let synth_action =
-                    self.selected_synth()
-                        .and_then(|(asset_id, descriptor, parameters)| {
-                            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
-                                synth_panel::show(ui, descriptor, parameters, &clip.notes, rate)
-                            })
-                            .inner
-                            .map(|action| (asset_id, action))
-                        });
-                if let Some((asset_id, action)) = synth_action {
+                let synth = self.selected_synth();
+                let asset_id = synth.map(|(asset_id, _, _)| asset_id);
+                let peaks = self.waveforms.get(&clip.asset_id);
+
+                let (outcome, synth_action) = inspector_sections(
+                    ui,
+                    &clip,
+                    edit,
+                    rate,
+                    peaks,
+                    synth.map(|(_, descriptor, parameters)| (descriptor, parameters)),
+                );
+
+                if let (Some(asset_id), Some(action)) = (asset_id, synth_action) {
                     self.apply_synth_action(asset_id, clip.id, action);
                 }
 
@@ -2255,11 +2263,10 @@ impl JutsuAudioApp {
     /// Draws the level, timing and action sections. Returns what the user did
     /// instead of mutating, so the panel closure keeps a single borrow of self.
     fn inspector_body(
-        &self,
         ui: &mut egui::Ui,
-        clip: &Clip,
         mut edit: ClipEdit,
         rate: u32,
+        peaks: Option<&WaveformState>,
     ) -> InspectorOutcome {
         let mut changed = false;
         let mut released = false;
@@ -2437,7 +2444,7 @@ impl JutsuAudioApp {
         theme::column_label(ui, "Source");
         ui.add_space(4.0);
         ui.label(
-            RichText::new(match self.waveforms.get(&clip.asset_id) {
+            RichText::new(match peaks {
                 Some(WaveformState::Ready(_)) => "peaks cached",
                 Some(WaveformState::Pending) => "reading peaks...",
                 Some(WaveformState::Failed) => "peaks unavailable",
@@ -2569,11 +2576,21 @@ impl JutsuAudioApp {
                                 fit_requested = true;
                             }
                             ui.add_space(6.0);
-                            ui.label(
-                                RichText::new("Ctrl+wheel zoom · Shift+wheel scroll")
-                                    .font(theme::mono(9.5))
-                                    .color(theme::FAINT),
-                            );
+                            // The hint is the first thing to go when the row
+                            // runs out of room: a narrow window used to draw it
+                            // straight through the buttons to its left, and the
+                            // gestures are in the shortcut reference anyway.
+                            let hint = "Ctrl+wheel zoom · Shift+wheel scroll";
+                            let font = theme::mono(9.5);
+                            let width = ui.fonts_mut(|fonts| {
+                                fonts
+                                    .layout_no_wrap(hint.to_owned(), font.clone(), theme::FAINT)
+                                    .size()
+                                    .x
+                            });
+                            if width + 8.0 <= ui.available_width() {
+                                ui.label(RichText::new(hint).font(font).color(theme::FAINT));
+                            }
                         });
                     },
                 );
@@ -2665,6 +2682,48 @@ impl JutsuAudioApp {
 }
 
 // ─── small shared widgets ───────────────────────────────────────────────────
+
+/// The inspector's scrolling body: the clip's own sections, then the synth's
+/// if the clip plays one.
+///
+/// One `Ui`, one flow, one scroll. Drawing the two into rects that both started
+/// at the top of the panel is what put the synth's controls on top of the
+/// clip's — every label rendered, so only position ever showed it.
+fn inspector_sections(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    edit: ClipEdit,
+    rate: u32,
+    peaks: Option<&WaveformState>,
+    synth: Option<(&ExtensionDescriptor, &BTreeMap<String, ParameterValue>)>,
+) -> (InspectorOutcome, Option<SynthAction>) {
+    // A clip with two dozen notes needs more room than the panel has, so the
+    // body scrolls rather than drawing past the bottom edge.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // The sections live in an explicitly bounded, padded rect. Without
+            // one, right-aligned rows anchor to the parent's unbounded width
+            // and spill outside the panel. Unbounded downwards: that is what
+            // scrolls.
+            let body = egui::Rect::from_min_size(
+                ui.available_rect_before_wrap().min + Vec2::new(INSPECTOR_PADDING, 0.0),
+                Vec2::new(
+                    ui.available_width() - 2.0_f32 * INSPECTOR_PADDING,
+                    f32::INFINITY,
+                ),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                let outcome = JutsuAudioApp::inspector_body(ui, edit, rate, peaks);
+                let action = synth.and_then(|(descriptor, parameters)| {
+                    synth_panel::show(ui, descriptor, parameters, &clip.notes, rate)
+                });
+                (outcome, action)
+            })
+            .inner
+        })
+        .inner
+}
 
 fn separator(ui: &mut egui::Ui) {
     let (rect, _) =
@@ -2859,5 +2918,89 @@ mod tests {
     fn peak_levels_render_as_dbfs_with_a_silent_floor() {
         assert_eq!(theme::format_dbfs(1.0).trim(), "0.0");
         assert_eq!(theme::format_dbfs(0.0).trim(), "-inf");
+    }
+    /// A synth clip's inspector once drew its synth section into the same rect
+    /// its clip section started at, so `Waveform` landed on top of `Gain` and
+    /// the note list ran past the bottom of the panel. Every label rendered,
+    /// which is why only position catches it.
+    #[test]
+    fn the_inspector_stacks_its_sections_instead_of_drawing_them_on_top() {
+        let registries = extensions::registries();
+        let type_id = jutsu_audio_extensions::ExtensionTypeId::new("builtin.oscillator")
+            .expect("a valid type ID");
+        let descriptor = registries
+            .synth_descriptor(&type_id)
+            .expect("the built-in oscillator is registered");
+        let parameters: BTreeMap<String, ParameterValue> = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.id.clone(), parameter.default_value.clone()))
+            .collect();
+
+        // More notes than the panel is tall: the list has to scroll, not spill.
+        let mut clip = clip_with(-6.0);
+        clip.duration_samples = 48_000 * 8;
+        clip.notes = (0..24)
+            .map(|index| jutsu_audio_model::ClipNote {
+                start_frame: index * 2_000,
+                duration_frames: 1_800,
+                pitch_hz: 220.0 + f64::from(u32::try_from(index).unwrap_or(0)),
+                velocity: 0.8,
+            })
+            .collect();
+        let edit = ClipEdit::from_clip(&clip);
+
+        let mut harness = ui_harness::Harness::default();
+        let (frame, _) = harness.side_panel(248.0, |ui| {
+            inspector_sections(
+                ui,
+                &clip,
+                edit,
+                48_000,
+                None,
+                Some((descriptor, &parameters)),
+            )
+        });
+
+        assert!(
+            frame.overlaps().is_empty(),
+            "the inspector draws text on top of text: {:?}\n{}",
+            frame.overlaps(),
+            frame.transcript()
+        );
+        // Both halves are actually there — a panel that draws nothing also has
+        // no overlaps.
+        for expected in ["LEVEL", "TIMING", "ACTIONS", "SYNTH", "Waveform"] {
+            assert!(
+                frame.says(expected),
+                "the inspector never says {expected}: {}",
+                frame.transcript()
+            );
+        }
+
+        // And everything stays in the inspector's own column. The note list is
+        // longer than the panel is tall, so what does not fit is scrolled to
+        // rather than drawn over the timeline beside it.
+        let column_left = 1280.0_f32 - 248.0;
+        for (line, at) in &frame.text {
+            assert!(
+                at.min.x >= column_left - 1.0,
+                "'{line}' is drawn outside the inspector at {at:?}"
+            );
+        }
+    }
+
+    /// egui takes Ctrl+wheel for its own interface zoom before the application
+    /// sees it, which left the timeline's zoom branch unreachable: the gesture
+    /// the toolbar advertises did nothing at all.
+    #[test]
+    fn ctrl_wheel_is_left_for_the_timeline_rather_than_taken_by_egui() {
+        let context = egui::Context::default();
+        theme::configure(&context);
+        assert_eq!(
+            context.options(|options| options.input_options.zoom_modifier),
+            egui::Modifiers::NONE,
+            "egui is still diverting a modified wheel into its own zoom"
+        );
     }
 }

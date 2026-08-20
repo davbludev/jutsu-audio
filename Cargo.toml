@@ -33,3 +33,6 @@ members = [
     "xtask",
 ]
 resolver = "3"
+
+[build-dependencies]
+embed-resource = "3.0.11"

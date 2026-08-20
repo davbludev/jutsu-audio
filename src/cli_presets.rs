@@ -197,6 +197,10 @@ pub fn inserts_of(steps: &[ChainStep]) -> Vec<EffectInsert> {
             parameters: step.parameters.clone(),
             enabled: step.enabled,
             wet: step.wet,
+            // A preset describes a chain, not the mix it lands in: which track
+            // keys a compressor is a property of this project, not of the
+            // preset, so applying one never brings a routing decision with it.
+            sidechain: None,
         })
         .collect()
 }

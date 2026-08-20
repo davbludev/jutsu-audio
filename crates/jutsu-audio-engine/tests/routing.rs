@@ -79,6 +79,7 @@ impl Fixture {
             id,
             name: format!("Track {}", self.project.tracks.len() + 1),
             output_bus_id: output,
+            sends: Vec::new(),
             parameters: BTreeMap::new(),
             layers: vec![Layer {
                 id: LayerId::new(),

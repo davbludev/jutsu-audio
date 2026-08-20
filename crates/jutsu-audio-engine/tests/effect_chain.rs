@@ -125,6 +125,7 @@ fn insert(type_id: &str, amount: f64) -> EffectInsert {
         parameters: BTreeMap::from([("amount".into(), ParameterValue::Float(amount))]),
         enabled: true,
         wet: 1.0,
+        sidechain: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn project(track_effects: Vec<EffectInsert>, bus_effects: Vec<EffectInsert>) -> 
             id: TrackId::new(),
             name: "Track".into(),
             output_bus_id: master,
+            sends: Vec::new(),
             parameters: BTreeMap::new(),
             layers: vec![Layer {
                 id: LayerId::new(),

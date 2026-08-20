@@ -101,3 +101,33 @@ pub fn register(registries: &mut ExtensionRegistries) -> Result<(), ExtensionErr
 
 One entry point per pack, so a host adds it the way its author intended. The application's own
 registry lives in `src/extensions.rs`.
+
+## An effect that moves
+
+`Effect` has three methods with defaults, so an extension written before any of them existed
+still compiles and still renders. Implement the ones that mean something for what you are
+building and ignore the rest.
+
+```rust
+fn set_parameter(&mut self, id: &str, value: f64) {}
+fn set_channel(&mut self, channel: u16) {}
+fn process_with_key(&mut self, samples: &mut [f32], key: &[f32]) { self.process(samples) }
+fn set_impulse(&mut self, samples: &[f32], sample_rate: u32) {}
+```
+
+- **`set_parameter`** is called between blocks, never inside one, whenever an automation lane
+  writes to your insert. It may recompute coefficients; it may not allocate. The host also calls
+  it with the well-known id `tempo_bpm` before every block, whether or not anything is
+  automated — a delay that syncs to the beat reads it, and everything else ignores it.
+- **`set_channel`** is called once after `prepare`. The chain gives each channel of a strip its
+  own instance, so an effect that wants stereo width has to know which side it is; without it,
+  both sides move identically and the width is imaginary.
+- **`process_with_key`** hands you a second signal the same length as the block, when the insert
+  names a sidechain. A compressor uses it as its detector. The default ignores it.
+
+- **`set_impulse`** hands you audio to work with — an impulse response, folded to mono, at the
+  rate it was recorded at. Extensions do not open files: an insert names an asset in a text
+  parameter, and the host loads it. Called after `prepare` and before the first block.
+
+None of the four changes what an existing extension does, and the conformance checks cover an
+extension that implements none of them.

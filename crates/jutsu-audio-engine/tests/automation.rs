@@ -47,6 +47,7 @@ fn project() -> (Project, TrackId, BusId) {
                 id: track_id,
                 name: "Track".into(),
                 output_bus_id: master,
+                sends: Vec::new(),
                 parameters: BTreeMap::new(),
                 layers: vec![Layer {
                     id: LayerId::new(),

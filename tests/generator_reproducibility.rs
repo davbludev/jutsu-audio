@@ -11,12 +11,13 @@ use support::{call, ok};
 
 /// Seeds pinned here on purpose: if a generator's output changes, these change
 /// with it, and that is exactly the review conversation worth having.
-const GOLDEN_SEEDS: [(&str, u64); 5] = [
+const GOLDEN_SEEDS: [(&str, u64); 6] = [
     ("sfx.impact", 1),
     ("sfx.explosion", 2),
     ("sfx.laser", 3),
     ("sfx.pickup", 4),
     ("sfx.ambience", 5),
+    ("sfx.object", 6),
 ];
 
 const FRAMES: u64 = 8_000;

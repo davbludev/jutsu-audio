@@ -188,6 +188,78 @@ impl Partials {
     }
 }
 
+/// One resonance of a struck object: where it sits, how long it rings, how
+/// loud it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Resonance {
+    /// Multiple of the fundamental. Whole numbers make a musical note; the
+    /// awkward numbers in between are what make an object.
+    pub ratio: f64,
+    /// Seconds to fall 60 dB. Per mode, because that is the difference between
+    /// materials: wood loses its top instantly, metal keeps everything.
+    pub decay_s: f64,
+    pub gain: f32,
+}
+
+/// A bank of ringing resonances, struck by an excitation signal.
+///
+/// This exists because three sine partials is a musical note, whatever
+/// envelope is put on it. A listener asked to name one says "a bell", "a
+/// marimba", "a short musical thing" — never "a knock" or "a drip". The ear
+/// separates *an object* from *a note* by counting: a handful of partials
+/// fuse into one pitch, while twenty or thirty at unrelated ratios, each dying
+/// at its own rate, stop being a pitch and start being a material.
+///
+/// So a sound here is not drawn — it is struck. A short burst of contact noise
+/// goes into a bank of narrow resonators, and what comes out is the bank's own
+/// ringing. That is how real objects work, and it is why the same bank makes a
+/// knock, a tick, a coin and a drip depending only on how the modes are laid
+/// out.
+#[derive(Clone, Debug, Default)]
+pub struct Modes {
+    filters: Vec<Svf>,
+}
+
+impl Modes {
+    #[must_use]
+    pub fn new(count: usize) -> Self {
+        Self {
+            filters: vec![Svf::new(); count],
+        }
+    }
+
+    /// One sample: `excitation` struck into every mode, summed.
+    ///
+    /// The coefficients are recomputed each frame so the whole bank can glide,
+    /// which is what a water drop does as its cavity closes.
+    pub fn next(
+        &mut self,
+        fundamental_hz: f64,
+        modes: &[Resonance],
+        excitation: f32,
+        sample_rate: f64,
+    ) -> f32 {
+        let nyquist = sample_rate * 0.5;
+        let mut sum = 0.0_f32;
+        for (filter, mode) in self.filters.iter_mut().zip(modes) {
+            let hz = (fundamental_hz * mode.ratio).clamp(20.0, nyquist * 0.95);
+            let g = (std::f64::consts::PI * hz / sample_rate).tan() as f32;
+            // Ring time sets the damping: a band-pass decays as
+            // exp(-pi * f * t / Q), so a mode asked to last `decay_s` needs
+            // exactly this much Q, and k is its reciprocal.
+            let quality = (std::f64::consts::PI * hz * mode.decay_s / 6.907).max(0.5);
+            let k = (1.0 / quality) as f32;
+            // No correction for Q here, deliberately. A band-pass struck by an
+            // impulse rings at roughly the same peak however narrow it is —
+            // narrower only means longer. Scaling by k instead makes every
+            // long-ringing mode quiet, which leaves the fundamental alone in
+            // front and turns the whole bank back into a single pitch.
+            sum += filter.process(excitation, Mode::Band, g, k) * mode.gain;
+        }
+        sum
+    }
+}
+
 /// Soft saturation. `drive_db` above zero pushes the signal into the curve.
 ///
 /// This is most of what makes a loud sound *sound* loud: the peaks round off

@@ -13,6 +13,7 @@ pub mod dsp;
 pub mod explosion;
 pub mod impact;
 pub mod laser;
+pub mod object;
 pub mod pickup;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ pub fn register_sfx_generators(registries: &mut ExtensionRegistries) -> Result<(
     registries.register_generator(Arc::new(laser::factory()))?;
     registries.register_generator(Arc::new(pickup::factory()))?;
     registries.register_generator(Arc::new(ambience::factory()))?;
+    registries.register_generator(Arc::new(object::factory()))?;
     Ok(())
 }
 

@@ -18,7 +18,7 @@ use jutsu_audio_model::{
     Project, Track, TrackId,
 };
 
-use crate::effects::{ChainTiming, MixDiagnostic, apply_chain};
+use crate::effects::{ChainTiming, MixDiagnostic, MixDiagnosticCode, apply_chain};
 use crate::{PlaybackSnapshot, SnapshotError};
 
 /// Everything mixes to stereo for now; the mixer phase introduces real bus
@@ -54,8 +54,6 @@ pub struct SourceAudio {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MixErrorCode {
-    /// A clip names an asset the loader could not provide.
-    SourceUnavailable,
     /// A synth or generator clip names an extension that is not registered, or
     /// parameters the extension refuses.
     SynthUnavailable,
@@ -353,13 +351,17 @@ fn render_one_clip(
             render_clip(buffer, total_frames, &placed, &source, sample_rate);
         }
         None => {
-            let source = load(clip.asset_id).map_err(|message| {
-                MixError::new(
-                    MixErrorCode::SourceUnavailable,
-                    format!("clip {} cannot be rendered: {message}", clip.id),
-                )
-            })?;
-            render_clip(buffer, total_frames, clip, &source, sample_rate);
+            // A file that cannot be read isolates to its own clip: the rest of
+            // the project still plays, and the diagnostic says which sound is
+            // missing. One damaged sample should not silence a session.
+            match load(clip.asset_id) {
+                Ok(source) => render_clip(buffer, total_frames, clip, &source, sample_rate),
+                Err(message) => diagnostics.push(MixDiagnostic {
+                    code: MixDiagnosticCode::SourceUnreadable,
+                    entity_id: clip.id.to_string(),
+                    message: format!("clip {} plays silence: {message}", clip.id),
+                }),
+            }
         }
     }
     Ok(())

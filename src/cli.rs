@@ -5,8 +5,8 @@ use jutsu_audio_commands::edits::{self, DeleteMode};
 use jutsu_audio_commands::notes;
 use jutsu_audio_commands::{CommandError, EffectTarget, ProjectCommand};
 use jutsu_audio_engine::{
-    ExportEncoding, ExportRange, MIX_CHANNELS, OfflineExporter, PlaybackSnapshot, SourceAudio,
-    mix_project,
+    ExportEncoding, ExportRange, MIX_CHANNELS, MixDiagnostic, OfflineExporter, PlaybackSnapshot,
+    SourceAudio, mix_project_metered,
 };
 use jutsu_audio_extensions::{ExtensionTypeId, RegenerateMode};
 use jutsu_audio_model::{
@@ -14,9 +14,9 @@ use jutsu_audio_model::{
     ClipNote, Curve, EffectId, Layer, LayerId, LoopRegion, Marker, MarkerId, MusicalPosition,
     ParameterValue, PatternId, Project, SampleLoopMode, SamplerZone, TempoChange, Track, TrackId,
 };
-use jutsu_audio_project::bundle;
 use jutsu_audio_project::presets::{IncompatibilityCode, Preset, PresetKind, PresetPayload};
 use jutsu_audio_project::{AssetManager, ImportMode, ImportStatus, ProjectStore};
+use jutsu_audio_project::{bundle, report};
 use jutsu_audio_session::TransportAction as SessionTransportAction;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -283,6 +283,16 @@ enum Request {
     CheckAssets {
         protocol_version: u32,
         path: PathBuf,
+    },
+    /// Collects everything about a project file that a bug report needs, and
+    /// optionally writes it out beside a copy of the project. Works on a
+    /// project that will not open — that is when it earns its keep.
+    Diagnose {
+        protocol_version: u32,
+        path: PathBuf,
+        /// Where to write the bundle. Omitted: report only, nothing written.
+        #[serde(default)]
+        destination: Option<PathBuf>,
     },
     /// Finds moved or renamed audio by fingerprint and repoints the project.
     RelinkAssets {
@@ -946,6 +956,9 @@ impl Request {
             }
             | Self::RelinkAssets {
                 protocol_version, ..
+            }
+            | Self::Diagnose {
+                protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
             Self::ListExtensions { protocol_version } => *protocol_version,
@@ -1115,7 +1128,7 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
             } else {
                 (start_frame, frame_count)
             };
-            let snapshot = build_master_snapshot(&project, &path)?;
+            let (snapshot, diagnostics) = build_master_snapshot(&project, &path)?;
             let encoding = match encoding {
                 CliExportEncoding::Pcm16 => ExportEncoding::Pcm16,
                 CliExportEncoding::Float32 => ExportEncoding::Float32,
@@ -1130,9 +1143,21 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                 encoding,
             )
             .map_err(|error| (3, "export_failed", error.message))?;
-            Ok(
-                json!({"type": "wav_exported", "output": output, "sample_rate": report.sample_rate, "channel_count": report.channel_count, "frame_count": report.frame_count}),
-            )
+            Ok(json!({
+                "type": "wav_exported",
+                "output": output,
+                "sample_rate": report.sample_rate,
+                "channel_count": report.channel_count,
+                "frame_count": report.frame_count,
+                "diagnostics": diagnostics
+                    .iter()
+                    .map(|diagnostic| json!({
+                        "code": format!("{:?}", diagnostic.code).to_lowercase(),
+                        "entity_id": diagnostic.entity_id,
+                        "message": diagnostic.message,
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
         }
         Request::Transport {
             path,
@@ -2264,6 +2289,28 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                     .collect::<Vec<_>>(),
             }))
         }
+        Request::Diagnose {
+            path, destination, ..
+        } => {
+            let report = match &destination {
+                Some(destination) => {
+                    report::write_bundle(&path, destination).map_err(project_error)?
+                }
+                None => report::collect(&path),
+            };
+            let mut body = serde_json::to_value(&report).map_err(|error| {
+                (
+                    3,
+                    "project_io_failed",
+                    format!("report could not be encoded: {error}"),
+                )
+            })?;
+            body["type"] = json!("project_diagnosed");
+            if let Some(destination) = destination {
+                body["bundle"] = json!(destination);
+            }
+            Ok(body)
+        }
         Request::RelinkAssets {
             path, search_paths, ..
         } => {
@@ -2352,10 +2399,16 @@ impl From<TransportAction> for SessionTransportAction {
 ///
 /// The project's rate is taken from its first decodable source, because the
 /// schema has no rate field yet; a clip at another rate is resampled onto it.
+/// A master mix and what the mix had to work around.
+type MasterMix = (std::sync::Arc<PlaybackSnapshot>, Vec<MixDiagnostic>);
+
+/// The mixed master, plus anything the mix had to work around — a sample that
+/// will not decode, an effect this build does not have. An export that quietly
+/// dropped a sound would be worse than one that failed.
 fn build_master_snapshot(
     project: &Project,
     project_path: &Path,
-) -> Result<std::sync::Arc<PlaybackSnapshot>, (i32, &'static str, String)> {
+) -> Result<MasterMix, (i32, &'static str, String)> {
     let project_directory = project_path.parent().unwrap_or_else(|| Path::new("."));
     let mut decoded: HashMap<AssetId, SourceAudio> = HashMap::new();
     for asset in &project.assets {
@@ -2391,7 +2444,7 @@ fn build_master_snapshot(
         .find_map(|asset| decoded.get(&asset.id))
         .map_or(48_000, |source| source.sample_rate);
 
-    let mixed = mix_project(
+    let mixed = mix_project_metered(
         project,
         sample_rate,
         crate::extensions::registries(),
@@ -2404,13 +2457,13 @@ fn build_master_snapshot(
     )
     .map_err(|error| (3, "export_failed", error.message))?;
 
-    let snapshot = match mixed {
+    let snapshot = match mixed.snapshot {
         Some(snapshot) => snapshot,
         // Exporting silence beats failing: the caller asked for a file.
         None => PlaybackSnapshot::new(sample_rate, MIX_CHANNELS, std::sync::Arc::from(Vec::new()))
             .map_err(|error| (3, "export_failed", error.message))?,
     };
-    Ok(std::sync::Arc::new(snapshot))
+    Ok((std::sync::Arc::new(snapshot), mixed.diagnostics))
 }
 
 fn project_error(error: jutsu_audio_project::ProjectFileError) -> (i32, &'static str, String) {

@@ -20,6 +20,9 @@ pub enum MixDiagnosticCode {
     EffectVersionMismatch,
     /// The extension refused the stored parameters.
     EffectParametersRejected,
+    /// A clip's audio could not be read or decoded. The clip plays silence and
+    /// everything else carries on.
+    SourceUnreadable,
 }
 
 /// One thing the mix could not do as asked, and what it did instead.

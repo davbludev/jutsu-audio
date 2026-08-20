@@ -72,8 +72,14 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
 - `crates/jutsu-audio-commands` also holds `history.rs`: `CommandHistory::apply` records a
   batch's inverse, and undo/redo replay through the engine. GUI and session edits share one
   stack, so undo reverses whatever happened last whoever did it.
-- `crates/jutsu-audio-project::autosave` — the `.autosave` sidecar. Written by the GUI worker,
-  removed by a successful save, offered at open through `src/recovery.rs`.
+- `crates/jutsu-audio-project::autosave` — the `.autosave` sidecar plus the generation before it
+  (`.autosave.1`). Written by the GUI worker, removed by a successful save, offered at open
+  through `src/recovery.rs`; `recover` falls back to the older generation when the newest will
+  not read.
+- `crates/jutsu-audio-project::report` — the diagnostic report and bundle behind the CLI's
+  `diagnose`. Reads the project file directly rather than opening it, so reporting never
+  migrates or writes; rules in `docs/design/crash-recovery-and-compatibility.md`, broken by
+  `tests/fault_injection.rs`.
 - `crates/jutsu-audio-session` — single-writer session layer. `protocol.rs` is the wire
   contract (newline-delimited JSON over loopback TCP), `discovery.rs` the `.session` sidecar a
   client dials, `lock.rs` the `.lock` sidecar an offline writer takes, `server.rs`/`client.rs`

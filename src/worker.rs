@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_source_is_reported_rather_than_rendered_as_silence() {
+    fn a_missing_source_is_reported_and_the_rest_of_the_mix_survives() {
         let directory = tempfile::tempdir().unwrap();
         let project_path = directory.path().join("mix.jutsu-audio.json");
         let source = directory.path().join("never-written.wav");
@@ -542,10 +542,21 @@ mod tests {
             },
             &mut cache,
         );
-        let JobResult::Mixdown { result, .. } = result else {
-            panic!("a broken source is a mixdown failure, not an empty timeline");
+        let JobResult::Mixdown {
+            result,
+            diagnostics,
+            ..
+        } = result
+        else {
+            panic!("a broken source still mixes, it does not empty the timeline");
         };
-        assert!(result.is_err());
+        assert!(result.is_ok(), "the mix renders without the missing clip");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("plays silence")),
+            "and says which clip is silent: {diagnostics:?}"
+        );
     }
 
     #[test]

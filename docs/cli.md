@@ -59,6 +59,10 @@ have stable IDs and keep them when they move. `set_loop_region` takes `start_fra
 and an optional `enabled` (default `true`); `clear_loop_region` forgets the region entirely,
 while `enabled: false` remembers where it was without playing it.
 
+`export_wav` reports `diagnostics`: anything the mix had to work around — a sample that will not
+decode, an extension this build does not have. The export still runs and still writes a file; a
+degraded render that said nothing would be the worse outcome.
+
 `export_wav` accepts `use_loop_region: true`, which writes exactly the frames the loop repeats
 and fails with `export_failed` when there is no active loop. The editor's own Export WAV does
 the same thing, and playback wraps on the same frame, so a loop sounds the same however it is
@@ -196,6 +200,14 @@ sound beats no bundle at all.
 
 `check_assets` reports what a project names but cannot read, and any path that would not survive
 the trip: that is what "portable" is checked with.
+
+`diagnose` collects everything a bug report needs about a project file: what schema version it
+declares against what this build supports, whether it opens and why not, validation diagnostics,
+every asset's presence, size, fingerprint match and decode error, the extension type IDs it
+references (including ones this build does not have), and what recovery material is on disk. It
+works on a project that will not open, and it never writes to the project it reports on. Given a
+`destination`, it writes `diagnostics.json` and a copy of the project as found into that
+directory. Rules behind it: `docs/design/crash-recovery-and-compatibility.md`.
 
 `relink_assets` searches the paths it is given for the audio a project is missing, matching by
 content fingerprint rather than by name, and repoints the project through an ordinary command —

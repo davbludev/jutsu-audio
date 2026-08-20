@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use jutsu_audio_engine::{MixErrorCode, SourceAudio, mix_project};
+use jutsu_audio_engine::{SourceAudio, mix_project};
 use jutsu_audio_extensions::{ExtensionRegistries, register_builtin};
 use jutsu_audio_model::{
     Asset, AssetId, AudioAssetSource, BusId, CURRENT_PROJECT_SCHEMA_VERSION, Clip, ClipId, Layer,
@@ -309,17 +309,36 @@ fn a_timeline_with_nothing_audible_is_not_an_error() {
 }
 
 #[test]
-fn a_source_the_loader_cannot_provide_is_a_structured_failure() {
+fn a_source_the_loader_cannot_provide_isolates_to_its_own_clip() {
     let mut builder = builder();
     let asset = builder.asset();
     builder.track(asset, clip(asset, 0, 4, &[]));
+    builder.track(asset, clip(asset, 0, 4, &[]));
 
-    let error = mix_project(&builder.project, RATE, &extensions(), |_| {
-        Err("no such file".into())
-    })
-    .expect_err("a missing source fails the mix");
-    assert_eq!(error.code, MixErrorCode::SourceUnavailable);
-    assert!(error.message.contains("no such file"), "{}", error.message);
+    // The first clip's audio is unreadable; the second's is fine.
+    let mut calls = 0;
+    let output =
+        jutsu_audio_engine::mix_project_metered(&builder.project, RATE, &extensions(), |_| {
+            calls += 1;
+            if calls == 1 {
+                Err("no such file".into())
+            } else {
+                Ok(mono(RATE, &[1.0, 1.0, 1.0, 1.0]))
+            }
+        })
+        .expect("the mix still renders");
+
+    let samples = output.snapshot.expect("audible").samples().to_vec();
+    assert!(
+        samples.iter().any(|sample| *sample != 0.0),
+        "the clip that could be read still plays"
+    );
+    let diagnostic = output.diagnostics.first().expect("a diagnostic");
+    assert!(
+        diagnostic.message.contains("no such file") && diagnostic.message.contains("plays silence"),
+        "{}",
+        diagnostic.message
+    );
 }
 
 #[test]

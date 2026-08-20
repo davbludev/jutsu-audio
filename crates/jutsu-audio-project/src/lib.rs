@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 pub mod autosave;
 pub mod bundle;
 pub mod presets;
+pub mod report;
 pub mod waveform;
 
 pub use waveform::{

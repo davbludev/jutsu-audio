@@ -63,6 +63,17 @@ impl Frame {
             .map(|(_, at)| at.center())
     }
 
+    /// Whether everything drawn sits inside a bottom panel of `height` — the
+    /// band from the window's bottom edge upwards. Anything outside it is
+    /// drawn over a neighbouring panel or off the window entirely.
+    #[must_use]
+    pub fn fits_in_bottom_panel(&self, height: f32) -> bool {
+        let top = SCREEN.y - height;
+        self.text
+            .iter()
+            .all(|(_, at)| at.min.y >= top && at.max.y <= SCREEN.y)
+    }
+
     /// Everything drawn, for a failure message worth reading.
     #[must_use]
     pub fn transcript(&self) -> String {
@@ -78,6 +89,10 @@ impl Frame {
 pub struct Harness {
     context: egui::Context,
     events: Vec<Event>,
+    /// Where the pointer is. Re-sent every frame, because a widget is only
+    /// clickable once it has been hovered — a press that arrives on the same
+    /// frame the pointer first appears lands on nothing.
+    pointer: Option<Pos2>,
 }
 
 impl Default for Harness {
@@ -87,6 +102,7 @@ impl Default for Harness {
         Self {
             context,
             events: Vec::new(),
+            pointer: None,
         }
     }
 }
@@ -117,7 +133,7 @@ impl Harness {
 
     /// Queues a click at a point, the two events egui expects for one.
     pub fn click(&mut self, at: Pos2) -> &mut Self {
-        self.events.push(Event::PointerMoved(at));
+        self.pointer = Some(at);
         for pressed in [true, false] {
             self.events.push(Event::PointerButton {
                 pos: at,
@@ -135,16 +151,24 @@ impl Harness {
     /// asserting on a fresh panel runs two frames — `settle` does that.
     pub fn frame(&mut self, build: impl FnMut(&egui::Context)) -> Frame {
         let mut build = build;
+        let mut events = Vec::new();
+        if let Some(at) = self.pointer {
+            events.push(Event::PointerMoved(at));
+        }
+        events.append(&mut self.events);
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-            events: std::mem::take(&mut self.events),
+            events,
             ..Default::default()
         };
         let output = self.context.run(input, |context| build(context));
 
         let mut text = Vec::new();
         for clipped in &output.shapes {
-            collect_text(&clipped.shape, &mut text);
+            // Clipped away is not drawn: a scroll area that hides an overflowing
+            // row is doing its job, and counting that row as visible would make
+            // every layout assertion below a lie.
+            collect_text(&clipped.shape, clipped.clip_rect, &mut text);
         }
         Frame { text }
     }
@@ -158,6 +182,27 @@ impl Harness {
             egui::CentralPanel::default().show(context, |ui| {
                 produced = Some(build(ui));
             });
+        });
+        (frame, produced)
+    }
+
+    /// A panel pinned to the bottom at a fixed height, the way the mixer rack
+    /// is hosted. The height matters: a rack given the whole window never
+    /// discovers that its strips do not fit the panel it actually lives in.
+    pub fn bottom_panel<T>(
+        &mut self,
+        height: f32,
+        build: impl FnMut(&mut egui::Ui) -> T,
+    ) -> (Frame, Option<T>) {
+        let mut build = build;
+        let mut produced = None;
+        let frame = self.settle(|context| {
+            egui::TopBottomPanel::bottom("harness-bottom")
+                .resizable(false)
+                .exact_height(height)
+                .show(context, |ui| {
+                    produced = Some(build(ui));
+                });
         });
         (frame, produced)
     }
@@ -178,17 +223,23 @@ impl Harness {
     }
 }
 
-fn collect_text(shape: &egui::Shape, into: &mut Vec<(String, Rect)>) {
+fn collect_text(shape: &egui::Shape, clip: Rect, into: &mut Vec<(String, Rect)>) {
     match shape {
-        egui::Shape::Text(text) => into.push((
-            text.galley.text().to_owned(),
-            Rect::from_min_size(text.pos, text.galley.size()),
-        )),
+        egui::Shape::Text(text) => {
+            let box_ = Rect::from_min_size(text.pos, text.galley.size());
+            // What a user sees is the part inside the clip rectangle. A row a
+            // scroll area cuts at its edge is cut, not spilling over the panel
+            // below — and a row entirely outside is not drawn at all.
+            let visible = box_.intersect(clip);
+            if visible.is_positive() {
+                into.push((text.galley.text().to_owned(), visible));
+            }
+        }
         // Panels and modals nest their contents, so a flat scan would miss
         // everything inside them.
         egui::Shape::Vec(shapes) => {
             for shape in shapes {
-                collect_text(shape, into);
+                collect_text(shape, clip, into);
             }
         }
         _ => {}
@@ -377,8 +428,9 @@ mod tests {
         let registries = crate::extensions::registries();
 
         let mut harness = Harness::default();
-        let (frame, _) =
-            harness.panel(|ui| crate::mixer_panel::show(ui, &project, &meters, registries));
+        let (frame, _) = harness.bottom_panel(crate::MIXER_PANEL_HEIGHT, |ui| {
+            crate::mixer_panel::show(ui, &project, &meters, registries)
+        });
         assert!(
             frame.says("MIXER") && frame.says("Footsteps"),
             "{}",
@@ -398,13 +450,21 @@ mod tests {
             overlaps.is_empty(),
             "labels are drawn on top of each other: {overlaps:?}"
         );
+        // And the strip fits the panel it lives in rather than running under
+        // the transport bar below it.
+        assert!(
+            frame.fits_in_bottom_panel(crate::MIXER_PANEL_HEIGHT),
+            "{}",
+            frame.transcript()
+        );
 
         let at = frame
             .position_of("+ Bus")
             .expect("the add-bus button is drawn");
         harness.click(at);
-        let (_, actions) =
-            harness.panel(|ui| crate::mixer_panel::show(ui, &project, &meters, registries));
+        let (_, actions) = harness.bottom_panel(crate::MIXER_PANEL_HEIGHT, |ui| {
+            crate::mixer_panel::show(ui, &project, &meters, registries)
+        });
         assert!(
             actions
                 .expect("the panel ran")
@@ -412,5 +472,62 @@ mod tests {
                 .any(|action| matches!(action, crate::mixer_panel::MixerAction::AddBus)),
             "clicking + Bus must ask for a bus"
         );
+    }
+
+    #[test]
+    fn a_strip_loaded_with_effects_stays_inside_its_panel() {
+        let mut project = arranged();
+        for type_id in ["builtin.lowpass", "builtin.delay", "builtin.reverb"] {
+            project.tracks[0]
+                .effects
+                .push(jutsu_audio_model::EffectInsert {
+                    id: jutsu_audio_model::EffectId::new(),
+                    type_id: type_id.into(),
+                    state_version: 1,
+                    parameters: std::collections::BTreeMap::new(),
+                    enabled: true,
+                    wet: 1.0,
+                });
+        }
+        let meters = jutsu_audio_engine::Meters::default();
+        let registries = crate::extensions::registries();
+
+        let mut harness = Harness::default();
+        let (frame, _) = harness.bottom_panel(crate::MIXER_PANEL_HEIGHT, |ui| {
+            crate::mixer_panel::show(ui, &project, &meters, registries)
+        });
+
+        // Anything past the panel is scrolled out of view rather than drawn
+        // over the transport below it, and the rack scrolls to reach it.
+        assert!(
+            frame.fits_in_bottom_panel(crate::MIXER_PANEL_HEIGHT),
+            "a loaded strip draws past its {:.0}px panel: {}",
+            crate::MIXER_PANEL_HEIGHT,
+            frame.transcript()
+        );
+        assert!(frame.overlaps().is_empty(), "{:?}", frame.overlaps());
+    }
+
+    #[test]
+    #[ignore = "prints the mixer layout; run with --ignored to look at it"]
+    fn dump_the_mixer_layout() {
+        let project = arranged();
+        let meters = jutsu_audio_engine::Meters::default();
+        let registries = crate::extensions::registries();
+        let mut harness = Harness::default();
+        let (frame, _) = harness.bottom_panel(crate::MIXER_PANEL_HEIGHT, |ui| {
+            crate::mixer_panel::show(ui, &project, &meters, registries)
+        });
+        let mut rows = frame.text.clone();
+        rows.sort_by(|one, two| {
+            one.1
+                .min
+                .x
+                .total_cmp(&two.1.min.x)
+                .then(one.1.min.y.total_cmp(&two.1.min.y))
+        });
+        for (text, at) in rows {
+            println!("x {:6.1} y {:6.1}  {text}", at.min.x, at.min.y);
+        }
     }
 }

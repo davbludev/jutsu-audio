@@ -85,7 +85,11 @@ pub fn show(
     });
     ui.add_space(4.0);
 
-    egui::ScrollArea::horizontal()
+    // Both directions: sideways for more strips than fit, and downwards because
+    // a strip grows with every effect on it and the rack lives in a panel of
+    // fixed height. Without the vertical one, the fourth insert on a track
+    // would simply not be reachable.
+    egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {

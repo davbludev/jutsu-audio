@@ -34,6 +34,11 @@ it has moved.
   moved audio by fingerprint.
 - `crates/jutsu-audio-project::presets` — the user preset library (one file per preset) and the
   compatibility report; `src/cli_presets.rs` is its machine surface.
+- `examples/pocket-extensions` — the third-party extension example, a workspace member outside
+  `crates/`. Depends only on the published extension surface; its tests are the conformance run
+  a pack author writes. Rules: `docs/extension-sdk.md`.
+- `crates/jutsu-audio-extensions::conformance` — the checks any extension runs, built-ins
+  included (`crates/jutsu-audio-extensions/tests/conformance.rs`).
 - `src/cli_batch.rs` — `describe_protocol` (the operation table a test pins against serde's
   accepted variants) and `batch` (rollback by restoring the project bytes; dry run, JSONL
   progress on stderr, timeout as cancellation).

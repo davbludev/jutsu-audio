@@ -335,7 +335,7 @@ fn render_one_clip(
             // A clip playing a pattern has its notes resolved here, so the
             // synth sees one flat list however they were written.
             let notes = clip.resolved_notes(&project.patterns);
-            let source = render_extension_clip(
+            match render_extension_clip(
                 extensions,
                 source,
                 clip,
@@ -343,12 +343,23 @@ fn render_one_clip(
                 sample_rate,
                 load,
                 diagnostics,
-            )?;
-            // The rendered buffer *is* the clip, so it is read from its start
-            // rather than from the clip's source offset.
-            let mut placed = clip.clone();
-            placed.source_start_sample = 0;
-            render_clip(buffer, total_frames, &placed, &source, sample_rate);
+            ) {
+                Ok(source) => {
+                    // The rendered buffer *is* the clip, so it is read from its
+                    // start rather than from the clip's source offset.
+                    let mut placed = clip.clone();
+                    placed.source_start_sample = 0;
+                    render_clip(buffer, total_frames, &placed, &source, sample_rate);
+                }
+                // An extension this build does not have is the same kind of
+                // problem as a sample it cannot read: one silent clip, named,
+                // rather than a project that will not play at all.
+                Err(error) => diagnostics.push(MixDiagnostic {
+                    code: MixDiagnosticCode::ExtensionUnavailable,
+                    entity_id: clip.id.to_string(),
+                    message: error.message,
+                }),
+            }
         }
         None => {
             // A file that cannot be read isolates to its own clip: the rest of

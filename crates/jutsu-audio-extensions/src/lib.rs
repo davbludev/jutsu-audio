@@ -6,6 +6,7 @@ use jutsu_audio_model::ParameterValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod builtin;
+pub mod conformance;
 pub mod effects;
 pub mod generators;
 pub mod parameters;
@@ -313,6 +314,26 @@ impl ExtensionRegistries {
         self.generators
             .get(type_id)
             .map(|factory| factory.descriptor())
+    }
+
+    /// The factory itself, for a caller that needs more than the descriptor —
+    /// the conformance checks, which instantiate an extension many times over.
+    #[must_use]
+    pub fn synth_factory(&self, type_id: &ExtensionTypeId) -> Option<&Arc<dyn SynthFactory>> {
+        self.synths.get(type_id)
+    }
+
+    #[must_use]
+    pub fn effect_factory(&self, type_id: &ExtensionTypeId) -> Option<&Arc<dyn EffectFactory>> {
+        self.effects.get(type_id)
+    }
+
+    #[must_use]
+    pub fn generator_factory(
+        &self,
+        type_id: &ExtensionTypeId,
+    ) -> Option<&Arc<dyn GeneratorFactory>> {
+        self.generators.get(type_id)
     }
 
     /// Every registered synth type, in ID order. Discovery for a caller that

@@ -367,3 +367,77 @@ fn a_project_that_will_not_open_can_still_be_reported_on() {
         "including the broken file exactly as it was found"
     );
 }
+
+#[test]
+fn a_project_needing_an_extension_this_build_lacks_still_edits_and_exports() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let (path, _, _) = project_with_a_sample(directory.path());
+
+    // A synth from an extension pack this build does not have installed, with
+    // a clip playing it. `examples/pocket-extensions` is where it comes from.
+    let mut raw: Value = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    raw["assets"].as_array_mut().expect("assets").push(json!({
+        "id": "2b5e2b28-6d3a-4a1c-9f2f-7c1f0f4a55b1",
+        "name": "Pocket Pluck",
+        "source": {
+            "type": "synth",
+            "type_id": "pocket.pluck",
+            "state_version": 1,
+            "parameters": {"decay_ms": {"type": "float", "value": 400.0}}
+        }
+    }));
+    raw["tracks"][0]["layers"][0]["clips"]
+        .as_array_mut()
+        .expect("clips")
+        .push(json!({
+            "id": "6f1b9d02-1c4e-49f8-8f3a-52d1f2b7a903",
+            "asset_id": "2b5e2b28-6d3a-4a1c-9f2f-7c1f0f4a55b1",
+            "start_sample": 0,
+            "source_start_sample": 0,
+            "duration_samples": 480,
+            "notes": [{
+                "start_frame": 0,
+                "duration_frames": 240,
+                "pitch_hz": 220.0,
+                "velocity": 0.8
+            }]
+        }));
+    fs::write(&path, serde_json::to_vec_pretty(&raw).expect("encode")).expect("write");
+
+    // Editing something else entirely still works.
+    let _ = ok(json!({
+        "protocol_version": 1,
+        "operation": "add_track",
+        "path": path,
+        "name": "Beside it"
+    }));
+
+    let output = directory.path().join("cue.wav");
+    let exported = ok(json!({
+        "protocol_version": 1,
+        "operation": "export_wav",
+        "path": path,
+        "output": output,
+        "encoding": "float32"
+    }));
+    assert!(
+        exported["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .any(|diagnostic| diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("pocket.pluck"))),
+        "the missing extension is named: {exported}"
+    );
+
+    let after: Value = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    let assets = after["assets"].as_array().expect("assets");
+    assert!(
+        assets
+            .iter()
+            .any(|asset| asset["source"]["type_id"] == "pocket.pluck"
+                && asset["source"]["parameters"]["decay_ms"]["value"] == 400.0),
+        "and the asset it could not play is written back untouched"
+    );
+}

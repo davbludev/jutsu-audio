@@ -1,0 +1,10 @@
+[package]
+name = "pocket-extensions"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "An example third-party extension pack: one synth, one effect, one generator."
+
+[dependencies]
+jutsu-audio-extensions = { path = "../../crates/jutsu-audio-extensions" }
+jutsu-audio-model = { path = "../../crates/jutsu-audio-model" }

@@ -23,6 +23,9 @@ pub enum MixDiagnosticCode {
     /// A clip's audio could not be read or decoded. The clip plays silence and
     /// everything else carries on.
     SourceUnreadable,
+    /// A clip names a synth, sampler or generator this build cannot provide.
+    /// Same treatment: that clip is silent, the rest of the mix plays.
+    ExtensionUnavailable,
 }
 
 /// One thing the mix could not do as asked, and what it did instead.

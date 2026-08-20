@@ -42,6 +42,8 @@ it has moved.
 - `xtask/src/package.rs` + `smoke.rs` — `cargo package-release` builds a release directory
   (binaries, docs, generated INSTALL/notices/SHA256SUMS); `cargo smoke <dir>` runs the packaged
   binaries like a user would. Process and platform list: `docs/release.md`.
+- `src/shortcuts_help.rs` — the keyboard reference overlay and `step_selection`, the Tab walk
+  through the arrangement. The key list here documents what `main.rs::shortcuts` handles.
 - `src/audio_setup.rs` — the first-run "no output device" notice, with a retry that reopens the
   default device. Wired in `main.rs::audio_prompt`.
 - `src/cli_batch.rs` — `describe_protocol` (the operation table a test pins against serde's

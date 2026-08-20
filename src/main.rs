@@ -8,6 +8,7 @@ mod audio_setup;
 mod external_changes;
 mod mixer_panel;
 mod recovery;
+mod shortcuts_help;
 mod synth_panel;
 mod theme;
 mod timeline;
@@ -168,6 +169,8 @@ struct JutsuAudioApp {
     /// Shown once when there is no output device. Cleared when the user
     /// answers, so a machine without sound is not nagged all session.
     audio_notice: bool,
+    /// The keyboard reference, open until dismissed.
+    shortcuts_open: bool,
     audio_error: Option<String>,
     meter: f32,
 
@@ -250,6 +253,7 @@ impl JutsuAudioApp {
             snapshots,
             _audio: audio,
             audio_notice: audio_error.is_some(),
+            shortcuts_open: false,
             audio_error,
             meter: 0.0,
             worker: Worker::spawn(context.egui_ctx.clone()),
@@ -1352,7 +1356,10 @@ impl eframe::App for JutsuAudioApp {
         self.timeline_panel(context);
         self.recovery_prompt(context);
         self.audio_prompt(context);
-        if self.recovery.is_none() && !self.audio_notice {
+        if self.shortcuts_open && shortcuts_help::prompt(context) {
+            self.shortcuts_open = false;
+        }
+        if self.recovery.is_none() && !self.audio_notice && !self.shortcuts_open {
             self.shortcuts(context);
         }
 
@@ -1468,6 +1475,30 @@ impl JutsuAudioApp {
                 input.key_pressed(egui::Key::End),
             )
         });
+        // Tab walks the arrangement, so every clip is reachable — and editable
+        // through the inspector — without a mouse.
+        let (step_clip, step_back, help) = context.input(|input| {
+            (
+                input.key_pressed(egui::Key::Tab),
+                input.modifiers.shift,
+                input.key_pressed(egui::Key::Questionmark) || input.key_pressed(egui::Key::F1),
+            )
+        });
+        if help {
+            self.shortcuts_open = true;
+        }
+        if step_clip {
+            let next =
+                shortcuts_help::step_selection(self.project(), self.selected_clip, !step_back);
+            if let Some(clip_id) = next {
+                self.select_clip(Some(clip_id));
+                // Follow the selection: a clip selected off-screen would be a
+                // selection the user cannot see.
+                if let Some(start) = self.selected_clip().map(|clip| clip.start_sample) {
+                    self.transport.seek(start);
+                }
+            }
+        }
         if loop_key {
             self.toggle_loop();
         }

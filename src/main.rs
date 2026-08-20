@@ -66,6 +66,10 @@ const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(2_000);
 const EXTERNAL_LATENCY: Duration = Duration::from_millis(50);
 /// Meter fall-off per frame. Fast enough to follow, slow enough to read.
 const METER_DECAY: f32 = 0.90;
+/// How tall the mixer rack is. A strip that grows past it loses its routing and
+/// effects off the bottom, so `ui_harness` asserts against this rather than
+/// leaving it to be noticed in a screenshot.
+const MIXER_PANEL_HEIGHT: f32 = 268.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -1809,7 +1813,7 @@ impl JutsuAudioApp {
                     .inner_margin(egui::Margin::symmetric(0, 8))
                     .stroke(Stroke::new(1.0_f32, theme::RULE)),
             )
-            .exact_height(268.0)
+            .exact_height(MIXER_PANEL_HEIGHT)
             .show(context, |ui| {
                 actions =
                     mixer_panel::show(ui, self.project(), &self.meters, extensions::registries());

@@ -34,6 +34,9 @@ it has moved.
   moved audio by fingerprint.
 - `crates/jutsu-audio-project::presets` — the user preset library (one file per preset) and the
   compatibility report; `src/cli_presets.rs` is its machine surface.
+- `src/cli_batch.rs` — `describe_protocol` (the operation table a test pins against serde's
+  accepted variants) and `batch` (rollback by restoring the project bytes; dry run, JSONL
+  progress on stderr, timeout as cancellation).
 - `src/cli_generator.rs` — generator discovery, recipe validation, preview rendering and the
   derived-ID rules `run_generator` uses.
 - `src/cli_synth.rs` — registry-backed validation and discovery for the CLI; `src/synth_panel.rs`

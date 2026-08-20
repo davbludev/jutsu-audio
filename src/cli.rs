@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli_session::{self, Applied};
-use crate::{cli_generator, cli_mixer, cli_presets, cli_synth};
+use crate::{cli_batch, cli_generator, cli_mixer, cli_presets, cli_synth};
 
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
 
@@ -283,6 +283,26 @@ enum Request {
     CheckAssets {
         protocol_version: u32,
         path: PathBuf,
+    },
+    /// What this build accepts: operations, exit codes, and which request to
+    /// send for the parts that depend on which extensions are registered.
+    DescribeProtocol { protocol_version: u32 },
+    /// Runs several requests against one project as a single change: all of
+    /// them land, or the project is left as it was.
+    Batch {
+        protocol_version: u32,
+        path: PathBuf,
+        requests: Vec<Value>,
+        /// Report what would happen, then put the project back.
+        #[serde(default)]
+        dry_run: bool,
+        /// Write one JSON object per step to stderr as the batch runs.
+        #[serde(default)]
+        progress: bool,
+        /// Give up and roll back if the batch runs longer than this. The way a
+        /// caller cancels a batch it cannot interrupt.
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
     /// Collects everything about a project file that a bug report needs, and
     /// optionally writes it out beside a copy of the project. Works on a
@@ -961,6 +981,10 @@ impl Request {
                 protocol_version, ..
             } => *protocol_version,
             Self::DescribeStrip { protocol_version } => *protocol_version,
+            Self::DescribeProtocol { protocol_version } => *protocol_version,
+            Self::Batch {
+                protocol_version, ..
+            } => *protocol_version,
             Self::ListExtensions { protocol_version } => *protocol_version,
         }
     }
@@ -2289,6 +2313,21 @@ fn execute(request: Request) -> Result<Value, (i32, &'static str, String)> {
                     .collect::<Vec<_>>(),
             }))
         }
+        Request::DescribeProtocol { .. } => Ok(cli_batch::describe_protocol(CLI_PROTOCOL_VERSION)),
+        Request::Batch {
+            path,
+            requests,
+            dry_run,
+            progress,
+            timeout_ms,
+            ..
+        } => cli_batch::run(
+            &path,
+            &requests,
+            dry_run,
+            progress,
+            timeout_ms.map(std::time::Duration::from_millis),
+        ),
         Request::Diagnose {
             path, destination, ..
         } => {

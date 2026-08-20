@@ -637,6 +637,13 @@ fn path_to_portable_string(path: &Path, error_path: &Path) -> Result<String, Pro
     Ok(parts.join("/"))
 }
 
+/// Restores a file to bytes taken from it earlier — the batch rollback path.
+/// Bytes rather than a `Project`, so what comes back is what was there, not
+/// what this build would write for the same project.
+pub fn write_bytes(path: impl AsRef<Path>, contents: &[u8]) -> Result<(), ProjectFileError> {
+    atomic_write(path.as_ref(), contents)
+}
+
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ProjectFileError> {
     let mut file = AtomicWriteFile::open(path)
         .map_err(|error| ProjectFileError::io(path, "open atomic project write", error))?;

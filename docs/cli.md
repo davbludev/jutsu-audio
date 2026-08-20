@@ -4,6 +4,46 @@
 
 Operations: `create_project`, `inspect_project`, `import_sample`, `add_clip`, `update_clip`, `delete_clip`, `export_wav`, `transport_request`, and `session_status`. Requests use snake_case tagged JSON with `protocol_version: 1`. Inspect output provides the complete project and the default `track_id`/`layer_id` needed for clip commands. `export_wav` accepts `encoding` (`pcm16` or `float32`) plus optional `start_frame` and `frame_count`.
 
+## Discovery
+
+`describe_protocol` takes no project and answers what this build accepts: every operation with a
+one-line summary, the protocol and schema versions it speaks, the exit codes and what they mean,
+and which operation to send for the parts that depend on which extensions are registered
+(`list_extensions`, `describe_strip`, `describe_effect`, `describe_generator`, `list_presets`).
+It carries nothing time-dependent, so two calls agree exactly. A test compares its operation list
+against what the request enum actually accepts, so the two cannot drift.
+
+## Batches
+
+`batch` runs several requests against one project as a single change:
+
+```json
+{"protocol_version": 1, "operation": "batch", "path": "cue.jutsu-audio.json",
+ "requests": [{"operation": "add_track", "name": "Layers"},
+              {"operation": "set_track_parameter", "track_id": "…", "key": "gain_db",
+               "value": {"type": "float", "value": -6.0}}]}
+```
+
+Each step is an ordinary request — same fields, same results — minus `protocol_version` and
+`path`, which the batch supplies. A step naming a different project is redirected at the batch's
+own: a transaction can only roll back what it owns.
+
+All the steps land or none do. On the first failure the project file is restored byte for byte
+and the response is `batch_failed`, carrying the failing step's index and every step's result so
+far. Files a step imported are left in place — unreferenced audio is harmless, and deleting files
+a batch did not create is not.
+
+- `dry_run: true` runs the steps, reports what each produced, then puts the project back.
+- `progress: true` writes one JSON object per step to **stderr** as the batch runs
+  (`{"type":"progress","index":0,"total":3,"operation":"add_track","ok":true}`), so a caller
+  watching a long batch does not wait for the answer. Stdout stays exactly one response.
+- `timeout_ms` gives up and rolls back once the batch has run longer than that, answering
+  `batch_cancelled`. It is how a caller cancels a batch it cannot interrupt.
+
+A batch refuses to run while an editor holds the project (`session_unavailable`): the editor is
+ahead of the file, so restoring the file would throw away its unsaved work. Sent individually,
+each request still goes through the editor and each is atomic on its own.
+
 Exit codes:
 
 - `0`: structured success.

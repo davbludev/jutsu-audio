@@ -14,7 +14,10 @@ pub const RULE: Color32 = Color32::from_rgb(0x26, 0x2b, 0x34);
 pub const GRID: Color32 = Color32::from_rgb(0x1c, 0x20, 0x27);
 pub const TEXT: Color32 = Color32::from_rgb(0xdf, 0xe3, 0xea);
 pub const DIM: Color32 = Color32::from_rgb(0x83, 0x8b, 0x99);
-pub const FAINT: Color32 = Color32::from_rgb(0x5c, 0x64, 0x72);
+/// Hints and captions. Measured, not chosen by eye: this is the darkest it can
+/// be and still clear WCAG AA for large text on every surface it lands on —
+/// see `contrast.rs`.
+pub const FAINT: Color32 = Color32::from_rgb(0x68, 0x6f, 0x7d);
 pub const SIGNAL: Color32 = Color32::from_rgb(0xf0, 0xa5, 0x31);
 pub const LIVE: Color32 = Color32::from_rgb(0x57, 0xc9, 0x8a);
 pub const DANGER: Color32 = Color32::from_rgb(0xe0, 0x73, 0x6b);

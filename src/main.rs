@@ -5,6 +5,10 @@
 //! mutation goes through the command engine — never directly.
 
 mod audio_setup;
+// A check on the palette rather than part of it: compiled with the tests, so
+// the ratio maths does not ship in the binary.
+#[cfg(test)]
+mod contrast;
 mod external_changes;
 mod mixer_panel;
 mod recovery;

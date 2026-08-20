@@ -28,9 +28,12 @@ focus order is egui's default rather than a designed one.
 | Controls carry text, not only glyphs | mixer strips, transport and inspector build from `theme::flat_button` and `RichText` labels |
 | Non-obvious controls explain themselves on hover | `on_hover_text` on the mute/solo chips, the audio-device status, the recovery choices |
 | Meaning is never carried by colour alone | mute and solo read `M`/`S`; the audio status reads `no audio device`; diagnostics are words |
+| Every foreground the interface draws clears WCAG 2.1 AA on the surface it lands on | `contrast::tests::every_colour_the_interface_draws_meets_its_threshold`, over the pairs in `src/contrast.rs` |
+| The measurement itself is checked against published vectors | `contrast::tests::the_published_vectors_come_out_right` |
 
-**Limits.** No screen-reader run has been done on any platform. Contrast has not been measured
-against WCAG ratios — the palette was chosen by eye.
+**Limits.** No screen-reader run has been done on any platform (`tasks/misc/M04`). Contrast is
+asserted for the pairs the interface uses; a new colour is only covered once it is added to
+`PAIRS`.
 
 ## Scalable interface
 
@@ -118,4 +121,5 @@ failing a build for being busy. There is no automated regression alarm on them.
 been built or smoke-tested — only Windows has. Nothing is signed or notarised; the layout is
 ready for someone with the keys. The by-hand items in `docs/release.md` — hearing playback,
 opening an export elsewhere, deleting the directory — have not been recorded on any machine yet,
-and no accessibility audit with real assistive technology has been run.
+and no accessibility audit with real assistive technology has been run. Those four gaps are
+tracked as `tasks/misc/M01`–`M04` rather than left in prose.

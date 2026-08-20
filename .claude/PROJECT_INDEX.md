@@ -92,6 +92,8 @@ Running the GUI against a real project: `cargo run -- path/to/project.jutsu-audi
 
 - `tests/sfx_workflow.rs` — the end-to-end SFX scenario, documented in
   `docs/workflows/first-sfx-edit.md`. Runs without an audio device.
+- `tests/music_workflow.rs` — the same for a music cue: tempo, patterns, sampler, mix, live edit,
+  reopen, export. `docs/workflows/first-music-cue.md`.
 - `tests/session_workflows.rs` — concurrent editor/CLI behaviour over a real socket.
 - `tests/support/mod.rs` — the shared harness both use: a live `Editor`, the in-process CLI, and
   a deterministic test WAV.

@@ -13,3 +13,8 @@ jutsu-audio-model = { path = "../jutsu-audio-model" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[bench]]
+name = "mixdown_stress"
+# Not libtest: this prints numbers for a human to compare, it does not assert.
+harness = false
